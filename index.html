@@ -137,8 +137,13 @@
   <div class="card">
     <div class="row" style="justify-content:space-between">
       <b>Mapa bazy</b>
-      <span class="small">Klik w kropkę → podgląd i przełączenie „dodane”. Warstwy włączasz w prawym górnym rogu mapy.</span>
+      <span class="row">
+        <input type="text" id="mapQ" placeholder="np. Katowice" size="16">
+        <button id="btnMapGo">Szukaj na mapie</button>
+        <span class="small" id="mapFind"></span>
+      </span>
     </div>
+    <p class="small" style="margin:0 0 8px">Klik w kropkę → podgląd i przełączenie „dodane”. Warstwy włączasz w prawym górnym rogu mapy. Wyszukiwarka tylko przenosi widok — niczego nie zaznacza.</p>
     <div class="legend">
       <span><i style="background:#f59e0b"></i>do dodania</span>
       <span><i style="background:#16a34a"></i>dodane</span>
@@ -221,7 +226,7 @@
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 <script>
 const TYPES={bump:'bump (próg)',hump:'hump (garb)',table:'table (płaski/wyniesiony)',cushion:'cushion (poduszka)'};
-const ENDPOINTS=['https://overpass-api.de/api/interpreter','https://overpass.kumi.systems/api/interpreter','https://overpass.private.coffee/api/interpreter'];
+const ENDPOINTS=['https://overpass-api.de/api/interpreter','https://overpass.osm.ch/api/interpreter','https://overpass.kumi.systems/api/interpreter','https://overpass.private.coffee/api/interpreter','https://maps.mail.ru/osm/tools/overpass/api/interpreter'];
 const PAGE=100;
 const PENDING_MS=5000;              /* ile sekund na cofnięcie „dodane” */
 const $=s=>document.querySelector(s);
@@ -358,33 +363,40 @@ const RNAME=Object.fromEntries(REGIONS);
 function setBusy(b){document.querySelectorAll('.busy').forEach(x=>x.disabled=b);}
 
 /* ---------- Overpass ---------- */
+const RETRY_HTTP=[429,500,502,503,504];   /* przeciążone bramki – warto powtórzyć */
 async function overpass(q){
   const errs=[];
   for(const ep of ENDPOINTS){
     const host=new URL(ep).host;
     for(const mode of ['POST','GET']){
-      const ctl=new AbortController(), to=setTimeout(()=>ctl.abort(),300000);
-      try{
-        setStatus(`Pobieram z ${host} (${mode})… może potrwać kilka minut`);
-        const r=mode==='POST'
-          ?await fetch(ep,{method:'POST',signal:ctl.signal,headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'data='+encodeURIComponent(q)})
-          :await fetch(ep+'?data='+encodeURIComponent(q),{signal:ctl.signal});
-        if(!r.ok){
-          errs.push(`${host}: HTTP ${r.status}`);
-          clearTimeout(to);
-          if(r.status!==0)break;
-        }else{
-          const txt=await r.text();clearTimeout(to);
-          try{return JSON.parse(txt);}
-          catch(e){errs.push(`${host}: odpowiedź nie jest JSON (serwer przeciążony?): ${txt.slice(0,80).replace(/\s+/g,' ')}`);break;}
-        }
-      }catch(e){
-        errs.push(`${host} ${mode}: ${e.name==='AbortError'?'przekroczono czas':'połączenie zablokowane/niedostępne'}`);
+      let stopMode=false;
+      for(let attempt=0;attempt<2&&!stopMode;attempt++){
+        const ctl=new AbortController(), to=setTimeout(()=>ctl.abort(),240000);
+        try{
+          setStatus(`Pobieram z ${host} (${mode})${attempt?`, próba ${attempt+1}`:''}… może potrwać kilka minut`);
+          const r=mode==='POST'
+            ?await fetch(ep,{method:'POST',signal:ctl.signal,headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'data='+encodeURIComponent(q)})
+            :await fetch(ep+'?data='+encodeURIComponent(q),{signal:ctl.signal});
+          if(r.ok){
+            const txt=await r.text();
+            try{return JSON.parse(txt);}
+            catch(e){errs.push(`${host}: odpowiedź nie jest JSON (serwer przeciążony?): ${txt.slice(0,60).replace(/\s+/g,' ')}`);stopMode=true;}
+          }else{
+            errs.push(`${host}: HTTP ${r.status}`);
+            if(RETRY_HTTP.includes(r.status)&&attempt===0){
+              setStatus(`${host} jest przeciążony (HTTP ${r.status}) – ponawiam za chwilę…`);
+              clearTimeout(to);await wait(2500);continue;
+            }
+            stopMode=true;
+          }
+        }catch(e){
+          errs.push(`${host} ${mode}: ${e.name==='AbortError'?'przekroczono czas':'połączenie zablokowane/niedostępne'}`);
+          stopMode=true;
+        }finally{clearTimeout(to);}
       }
-      clearTimeout(to);
     }
   }
-  throw new Error(errs.join(' | '));
+  throw new Error('serwery Overpass nie odpowiedziały ('+[...new Set(errs)].join(' | ')+') – to prawie zawsze chwilowe przeciążenie, spróbuj ponownie za minutę');
 }
 
 /* pobiera progi (i — dla całego województwa — granice gmin, żeby działał filtr miasta) */
@@ -456,7 +468,7 @@ async function refreshSelected(codes){
         const r=await syncRegion(c);
         log.push(`${RNAME[c]}: ${r.total}`+(r.added?` (nowych: ${r.added})`:'')+(r.gErr?` ⚠ gminy: ${r.gErr}`:` · gminy: ${r.gminy}`));
       }catch(e){
-        setStatus(`Błąd przy ${RNAME[c]}: ${e.message}. Spróbuj ponownie za chwilę.`);
+        setStatus(`Błąd przy ${RNAME[c]}: ${e.message}`);
         render();return;
       }
       render();
@@ -644,17 +656,19 @@ async function absorbItems(list){
 if(bc)bc.onmessage=e=>{const d=e.data;if(d&&d.kind==='progi:items')absorbItems(d.items);};
 
 /* ---------- widok: filtry ---------- */
-function filtered(){
+function filtered(ignoreStatus){
   const st=$('#fStatus').value, types=[...document.querySelectorAll('.fType:checked')].map(x=>x.value);
   const q=$('#fSearch').value.trim().toLowerCase(), rad=(+$('#fRad').value||10)*1000;
   const out=[];
   for(const i of items.values()){
     if(!types.includes(i.type))continue;
-    if(st==='gone'){if(!i.gone)continue;}
-    else{ if(i.gone)continue;
-      if(st==='todo'&&i.done)continue;
-      if(st==='done'&&!i.done)continue;
-      if(st==='new'&&i.fs==='baseline')continue; }
+    if(!ignoreStatus){
+      if(st==='gone'){if(!i.gone)continue;}
+      else{ if(i.gone)continue;
+        if(st==='todo'&&i.done)continue;
+        if(st==='done'&&!i.done)continue;
+        if(st==='new'&&i.fs==='baseline')continue; }
+    }
     if(q&&!(i.id.includes(q)||String(i.note||'').toLowerCase().includes(q)))continue;
     if($('#fWoj').value&&i.w!==$('#fWoj').value)continue;
     const cq=$('#fCity').value.trim().toLowerCase();
@@ -721,7 +735,12 @@ function initMap(){
   el.addEventListener('click',async e=>{
     const btn=e.target.closest('[data-toggle]'); if(!btn)return;
     e.preventDefault();
-    await toggleDone(btn.dataset.toggle);
+    const id=btn.dataset.toggle, it=items.get(id);
+    if(it){
+      if(pending.has(id))cancelPending(id,rowFor(id));
+      else if(it.done)await toggleDone(id);
+      else startPending(id,rowFor(id));   /* to samo 5-sekundowe okno co w tabeli */
+    }
     map.closePopup();
   });
 }
@@ -733,7 +752,8 @@ function renderMap(){
   if(z<12){$('#mapInfo').textContent='Przybliż mapę (zoom ≥ 12), żeby zobaczyć kropki.';return;}
   let n=0,skipped=0;
   const CAP=3000;
-  for(const i of view){
+  const list=filtered(true);   /* mapa pokazuje wszystkie statusy – filtr „Status” dotyczy tylko tabeli */
+  for(const i of list){
     if(!b.contains([i.lat,i.lon]))continue;
     if(n>=CAP){skipped++;continue;}
     n++;
@@ -750,7 +770,7 @@ function popupHtml(i){
     ${i.lat.toFixed(6)}, ${i.lon.toFixed(6)}
     <div class="small" style="color:#667085">${RNAME[i.w]||''}${i.c?' · '+esc(i.c):''}${i.fs!=='baseline'?' · wykryty '+i.fs:''}</div>
     <div style="margin-top:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-      <button data-toggle="${i.id}" style="border:1px solid #dfe3ea;border-radius:6px;padding:3px 8px;cursor:pointer">${i.done?'Cofnij „dodane”':'Oznacz jako dodane'}</button>
+      <button data-toggle="${i.id}" style="border:1px solid #dfe3ea;border-radius:6px;padding:3px 8px;cursor:pointer">${pending.has(i.id)?'Cofnij':i.done?'Cofnij „dodane”':'Oznacz jako dodane'}</button>
       <a href="${wme(i)}" target="_blank" rel="noopener" style="color:#2563eb">WME</a>
       <a href="${osm(i)}" target="_blank" rel="noopener" style="color:#2563eb">OSM</a>
     </div></div>`;
@@ -761,6 +781,27 @@ function paintMarker(id){
   const k=kindOf(it);
   m.setStyle({fillColor:MAPSTYLE[k].c});
 }
+const rowFor=id=>document.querySelector(`#tbody tr[data-id="${window.CSS&&CSS.escape?CSS.escape(id):id}"]`);
+/* wyszukiwarka miejsc: tylko przenosi mapę, niczego nie zaznacza */
+async function findPlace(){
+  const q=$('#mapQ').value.trim(), out=$('#mapFind');
+  if(!q){out.textContent='Wpisz nazwę miejscowości.';return;}
+  initMap();
+  out.textContent=`Szukam „${q}”…`;
+  try{
+    const url='https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&accept-language=pl&countrycodes=pl&q='+encodeURIComponent(q);
+    const r=await fetch(url,{headers:{Accept:'application/json'}});
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    const arr=await r.json();
+    if(!arr||!arr.length){out.textContent=`Nie znalazłem „${q}”.`;return;}
+    const p=arr[0], lat=parseFloat(p.lat), lon=parseFloat(p.lon);
+    if(isNaN(lat)||isNaN(lon)){out.textContent=`Brak współrzędnych dla „${q}”.`;return;}
+    map.setView([lat,lon],13);
+    out.textContent='→ '+(p.display_name||q);
+  }catch(e){out.textContent='Wyszukiwanie nie działa: '+e.message;}
+}
+$('#btnMapGo').onclick=findPlace;
+$('#mapQ').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();findPlace();}});
 
 /* ---------- 5-sekundowe okno na cofnięcie „dodane” ---------- */
 function startPending(id,tr){
