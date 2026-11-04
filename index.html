@@ -59,12 +59,23 @@
   .leaflet-container{font:inherit}
   .leaflet-popup-content{color:#1d2330}
   .leaflet-popup-content button{color:#1d2330;background:#fff}
-  /* --- lista „nowe progi” z przewijaniem (ok. 10 wierszy) --- */
-  .days{max-height:265px;overflow-y:auto;margin-top:6px}
+  /* --- lista „nowe progi” (bez przewijania, wszystkie 14 dni) --- */
+  .days{margin-top:6px}
   .day{display:flex;justify-content:space-between;gap:10px;padding:3px 2px;border-bottom:1px solid var(--bd);font-size:13px}
   .day:last-child{border-bottom:0}
   .day b{font-variant-numeric:tabular-nums}
   .day.zero{color:var(--mut)}
+  /* --- tabela pozycji: przewijanie w obu osiach + przyklejony nagłówek --- */
+  .tablewrap{max-height:min(70vh,520px);overflow:auto;border:1px solid var(--bd);border-radius:8px;overscroll-behavior:contain;
+    scrollbar-width:thin;scrollbar-color:var(--mut) transparent;background:var(--card)}
+  .tablewrap table{border-collapse:separate;border-spacing:0;min-width:760px}
+  .tablewrap thead th{position:sticky;top:0;z-index:2;background:var(--card);border-bottom:1px solid var(--bd)}
+  .tablewrap tbody tr:last-child td{border-bottom:0}
+  .tablewrap::-webkit-scrollbar{width:11px;height:11px}
+  .tablewrap::-webkit-scrollbar-track{background:transparent}
+  .tablewrap::-webkit-scrollbar-thumb{background:var(--bd);border-radius:99px;border:2px solid var(--card);background-clip:padding-box}
+  .tablewrap::-webkit-scrollbar-thumb:hover{background:var(--mut);background-clip:padding-box}
+  .tablewrap::-webkit-scrollbar-corner{background:var(--card)}
 </style>
 </head>
 <body>
@@ -154,7 +165,7 @@
         <button id="btnCsv">Eksport CSV (Excel)</button>
       </span>
     </div>
-    <div style="overflow-x:auto">
+    <div class="tablewrap">
       <table>
         <thead><tr><th>Dodany</th><th>Typ</th><th>Współrzędne</th><th>Wykryty</th><th>Linki</th><th>Notatka</th></tr></thead>
         <tbody id="tbody"></tbody>
