@@ -59,6 +59,12 @@
   .leaflet-container{font:inherit}
   .leaflet-popup-content{color:#1d2330}
   .leaflet-popup-content button{color:#1d2330;background:#fff}
+  /* --- lista „nowe progi” z przewijaniem (ok. 10 wierszy) --- */
+  .days{max-height:265px;overflow-y:auto;margin-top:6px}
+  .day{display:flex;justify-content:space-between;gap:10px;padding:3px 2px;border-bottom:1px solid var(--bd);font-size:13px}
+  .day:last-child{border-bottom:0}
+  .day b{font-variant-numeric:tabular-nums}
+  .day.zero{color:var(--mut)}
 </style>
 </head>
 <body>
@@ -134,6 +140,14 @@
 
   <div class="card">
     <div class="row" style="justify-content:space-between">
+      <b>Nowe progi – ostatnie 14 dni</b>
+      <span class="small" id="perDaySum"></span>
+    </div>
+    <div id="perDay" class="days"></div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
       <span id="count"></span>
       <span class="row">
         <button id="prev">←</button><span id="pageInfo"></span><button id="next">→</button>
@@ -150,13 +164,6 @@
 
   <div class="card">
     <details>
-      <summary>Nowe progi – ostatnie 14 dni</summary>
-      <div id="perDay" class="small" style="margin-top:8px"></div>
-    </details>
-  </div>
-
-  <div class="card">
-    <details>
       <summary>Masowe oznaczanie: wklej współrzędne progów, które już masz w Waze</summary>
       <p class="small">Jedna para na linię (lat, lon). Wszystkie progi z bazy w podanym promieniu zostaną oznaczone jako dodane.</p>
       <textarea id="bulk" placeholder="50.2945, 18.6714&#10;50.3001, 18.6802"></textarea>
@@ -169,8 +176,8 @@
 
   <div class="card">
     <details open>
-      <summary>Wspólna baza na GitHubie (strona ↔ userscript)</summary>
-      <p class="small" style="margin:8px 0">Strona, userscript do WME i plik <code id="pathPreview">data/progi.json</code> w repozytorium to jedna baza. Odczyt działa bez tokenu (repo publiczne), zapis wymaga tokenu GitHub z prawem „Contents: read and write”. Token zostaje tylko w tej przeglądarce.</p>
+      <summary>Zapisywanie bazy na serwerze (GitHub)</summary>
+      <p class="small" style="margin:8px 0">Baza jest trzymana w pliku <code id="pathPreview">data/progi.json</code> w Twoim repozytorium — te same dane masz na każdym komputerze i po wyczyszczeniu przeglądarki. Repozytorium jest prywatne, więc odczyt i zapis wymagają tokenu GitHub z prawem „Contents: read and write”. Token zostaje tylko w tej przeglądarce.</p>
       <div class="row">
         <label>repozytorium <input type="text" id="ghRepo" placeholder="użytkownik/repo" size="26"></label>
         <label>gałąź <input type="text" id="ghBranch" size="8"></label>
@@ -486,7 +493,7 @@ function updateRegionInfo(){
 }
 
 /* ================= chmura: GitHub Contents API ================= */
-const cloudOn=()=>!!(cfg.owner&&cfg.repo&&cfg.path);
+const cloudOn=()=>!!(cfg.owner&&cfg.repo&&cfg.path&&cfg.token);   /* repo prywatne → token do odczytu i zapisu */
 const ghUrl=()=>`https://api.github.com/repos/${cfg.owner}/${cfg.repo}/contents/${cfg.path}`;
 function docFromItems(){
   const o={version:2,updated:new Date().toISOString(),synced:{...synced},items:{}};
@@ -525,7 +532,7 @@ async function ghRead(){
   const url=`https://raw.githubusercontent.com/${cfg.owner}/${cfg.repo}/${encodeURIComponent(cfg.branch||'main')}/${cfg.path}?t=${Date.now()}`;
   const r=await fetch(url,{cache:'no-store'});
   if(r.status===404)return {sha:null,doc:docFromItems()};
-  if(!r.ok)throw new Error('GitHub odczyt (raw): HTTP '+r.status+' – repozytorium musi być publiczne, żeby czytać bez tokenu');
+  if(!r.ok)throw new Error('GitHub odczyt (raw): HTTP '+r.status+' – przy prywatnym repozytorium odczyt wymaga tokenu');
   return {sha:null,doc:await r.json()};
 }
 async function ghWrite(doc,msg){
@@ -553,7 +560,7 @@ async function ghWrite(doc,msg){
 function cloudInfo(txt,ok){
   const el=$('#ghInfo'); if(el){el.textContent=txt;el.style.color=ok===false?'var(--bad)':'';}
   const b=$('#cloudBadge');
-  if(b){b.textContent=cloudOn()?(cfg.token?'GitHub: zapis włączony':'GitHub: tylko odczyt'):'baza lokalna';
+  if(b){b.textContent=cloudOn()?'GitHub: zapis włączony':'baza lokalna';
     b.className='badge '+(cloudOn()?'cloud':'local');}
 }
 async function pullRemote(quiet){
@@ -602,23 +609,16 @@ function schedulePush(){
   },1500);
 }
 
-/* ---------- most do userscriptu WME + inne karty ---------- */
+/* ---------- inne karty tej samej strony (natychmiastowe odświeżenie) ---------- */
 let bc=null;
 try{bc=new BroadcastChannel('progi-wme');}catch(e){}
-const PROGI_SRC=/^https:\/\/(www|beta)\.waze\.com$/;
-function postToOpener(msg){
-  if(!window.opener)return;
-  try{window.opener.postMessage(msg,'*');}catch(e){}
-}
 function broadcastItems(arr){
-  const msg={kind:'progi:items',items:(arr||[]).map(stripItem)};
-  if(bc)try{bc.postMessage(msg);}catch(e){}
-  postToOpener(msg);
+  if(!bc)return;
+  try{bc.postMessage({kind:'progi:items',items:(arr||[]).map(stripItem)});}catch(e){}
 }
 function broadcastAll(){
-  const msg={kind:'progi:items',items:[...items.values()].map(stripItem)};
-  if(bc)try{bc.postMessage(msg);}catch(e){}
-  postToOpener(msg);
+  if(!bc)return;
+  try{bc.postMessage({kind:'progi:items',items:[...items.values()].map(stripItem)});}catch(e){}
 }
 async function absorbItems(list){
   if(!Array.isArray(list))return;
@@ -630,14 +630,6 @@ async function absorbItems(list){
   }
   if(changed.length){await saveMany(changed);render();}
 }
-window.addEventListener('message',e=>{
-  const d=e.data;
-  if(!d||typeof d!=='object')return;
-  const fromWme=PROGI_SRC.test(e.origin||'');
-  if(!fromWme&&e.origin!==location.origin)return;
-  if(d.kind==='progi:items')absorbItems(d.items);
-  else if(d.kind==='progi:hello'||d.kind==='progi:request')broadcastAll();
-});
 if(bc)bc.onmessage=e=>{const d=e.data;if(d&&d.kind==='progi:items')absorbItems(d.items);};
 
 /* ---------- widok: filtry ---------- */
@@ -675,7 +667,9 @@ function render(){
     +stat([...items.values()].filter(i=>i.gone).length,'zniknęły z OSM');
   const days={};for(let k=0;k<14;k++){const d=new Date();d.setDate(d.getDate()-k);days[d.toLocaleDateString('sv-SE')]=0;}
   all.forEach(i=>{if(i.fs in days)days[i.fs]++;});
-  $('#perDay').innerHTML=Object.entries(days).map(([d,n])=>`${d}: <b>${n}</b>`).join('<br>');
+  const dayRows=Object.entries(days);
+  $('#perDay').innerHTML=dayRows.map(([d,n])=>`<div class="day${n?'':' zero'}"><span>${d}</span><b>${n}</b></div>`).join('');
+  $('#perDaySum').textContent=`razem: ${dayRows.reduce((s,r)=>s+r[1],0)}`;
   view=filtered();
   const pages=Math.max(1,Math.ceil(view.length/PAGE)); if(page>=pages)page=Math.max(0,pages-1);
   $('#count').textContent=`${view.length} pozycji`;
@@ -870,9 +864,11 @@ function fillCloudUi(){
   $('#ghPath').value=cfg.path||'data/progi.json';
   $('#ghToken').value=cfg.token||'';
   $('#pathPreview').textContent=cfg.path||'data/progi.json';
-  cloudInfo(cloudOn()
-    ? (cfg.token?'Zapis do GitHuba włączony. Zmiany wysyłane są automatycznie ~1,5 s po kliknięciu.':'Odczyt z GitHuba działa; żeby zapisywać, wklej token.')
-    : 'Wpisz repozytorium (np. miodeq-ofc/Hazard), żeby dzielić bazę ze userscriptem.');
+  cloudInfo(!cfg.owner||!cfg.repo
+    ? 'Wpisz repozytorium (np. miodeq-ofc/Hazard), żeby trzymać bazę na serwerze.'
+    : !cfg.token
+      ? 'Repozytorium jest prywatne — podaj token GitHub (Contents: read and write), żeby czytać i zapisywać bazę.'
+      : 'Połączono z repozytorium — zmiany wysyłane są automatycznie ~1,5 s po kliknięciu.');
 }
 $('#btnGhSave').onclick=async()=>{
   const repo=$('#ghRepo').value.trim().replace(/^https?:\/\/github\.com\//,'').replace(/\.git$/,'');
@@ -933,8 +929,6 @@ $('#btnGhPush').onclick=async()=>{
     const due=selected.filter(c=>!synced[c]||Date.now()-synced[c]>864e5);
     if(due.length)refreshSelected(due);
   }
-  /* strona otwarta z panelu WME → od razu podaj dane userscriptowi */
-  if(window.opener)postToOpener({kind:'progi:hello'});
 })();
 </script>
 </body>
