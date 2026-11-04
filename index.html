@@ -1,0 +1,941 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Progi zwalniające → WME</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
+<style>
+  :root{--bg:#f6f7f9;--card:#fff;--tx:#1d2330;--mut:#667085;--bd:#dfe3ea;--ac:#2563eb;--ok:#16a34a;--new:#f59e0b;--bad:#dc2626}
+  @media (prefers-color-scheme:dark){:root{--bg:#12151c;--card:#1b2029;--tx:#e6e9ef;--mut:#98a2b3;--bd:#2d3442;--ac:#6ea0ff;--ok:#4ade80;--new:#fbbf24;--bad:#f87171}}
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.45 system-ui,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--tx)}
+  header{padding:16px 20px;border-bottom:1px solid var(--bd);background:var(--card);display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+  h1{font-size:18px;margin:0;flex:1 1 auto}
+  main{padding:16px 20px;max-width:1200px;margin:0 auto}
+  .card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:12px 14px;margin-bottom:12px}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
+  .stat b{display:block;font-size:22px}
+  .stat span{color:var(--mut);font-size:12px}
+  button,select,input[type=text],input[type=password],input[type=number],textarea{font:inherit;color:var(--tx);background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:6px 10px}
+  button{cursor:pointer}
+  button.pri{background:var(--ac);color:#fff;border-color:var(--ac)}
+  button:disabled{opacity:.5;cursor:default}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  .row label{display:inline-flex;gap:5px;align-items:center}
+  table{width:100%;border-collapse:collapse}
+  th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--bd);vertical-align:middle}
+  th{font-size:12px;color:var(--mut);font-weight:600}
+  tr.done td{opacity:.55}
+  tr.gone td{text-decoration:line-through;opacity:.45}
+  .badge{display:inline-block;font-size:11px;padding:1px 7px;border-radius:99px;border:1px solid var(--bd);color:var(--mut)}
+  .badge.new{border-color:var(--new);color:var(--new)}
+  .badge.cloud{border-color:var(--ok);color:var(--ok)}
+  .badge.local{border-color:var(--new);color:var(--new)}
+  a{color:var(--ac);text-decoration:none;margin-right:8px}
+  a:hover{text-decoration:underline}
+  #status{color:var(--mut)}
+  details summary{cursor:pointer;font-weight:600}
+  textarea{width:100%;min-height:90px;font-family:ui-monospace,monospace}
+  .note{width:100%;min-width:120px}
+  .small{font-size:12px;color:var(--mut)}
+  .regs{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:4px 12px;margin-top:8px}
+  .reg{display:flex;gap:6px;align-items:center}
+  input[type=checkbox]{width:18px;height:18px}
+  /* --- animacja "dodane" z 5-sekundowym okienkiem na cofnięcie --- */
+  tr.pending{animation:pendingFill var(--wait,5s) linear forwards}
+  @keyframes pendingFill{from{background-color:rgba(22,163,74,0)}to{background-color:rgba(22,163,74,.28)}}
+  tr.pending td{background-color:transparent}
+  tr.pending .undo{display:inline-block;color:var(--ok);font-weight:600;margin-left:6px;animation:blink 1s ease-in-out infinite}
+  .undo{display:none}
+  @keyframes blink{50%{opacity:.35}}
+  tr.leaving{animation:leaveOut .34s ease forwards}
+  @keyframes leaveOut{to{opacity:0;transform:translateX(14px)}}
+  /* --- mapa --- */
+  #map{height:480px;border-radius:8px;overflow:hidden;border:1px solid var(--bd);background:#e8eaee}
+  #map.placeholder{display:flex;align-items:center;justify-content:center}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;align-items:center;font-size:12px;color:var(--mut);margin:0 0 8px}
+  .legend i{display:inline-block;width:11px;height:11px;border-radius:50%;margin-right:5px;vertical-align:-1px}
+  .leaflet-container{font:inherit}
+  .leaflet-popup-content{color:#1d2330}
+  .leaflet-popup-content button{color:#1d2330;background:#fff}
+</style>
+</head>
+<body>
+<header>
+  <h1>Progi zwalniające w Polsce → WME</h1>
+  <span class="badge" id="cloudBadge">baza lokalna</span>
+  <span id="status">Ładowanie…</span>
+</header>
+<main>
+  <div class="card stats" id="stats"></div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <b>Województwa do pobrania</b>
+      <span class="row">
+        <button id="rAll">wszystkie</button><button id="rNone">żadne</button>
+        <button class="pri busy" id="btnRefresh">Aktualizuj zaznaczone</button>
+      </span>
+    </div>
+    <div id="regions" class="regs"></div>
+    <div class="row" style="margin-top:10px">
+      <b>Albo jedno miasto/gmina:</b>
+      <input type="text" id="cityName" placeholder="np. Gliwice" size="16">
+      <select id="cityReg"></select>
+      <button class="busy" id="btnCity">Pobierz miasto</button>
+    </div>
+    <p class="small" style="margin:6px 0 0">Przy każdym województwie: liczba progów · data ostatniej aktualizacji. Pobierane są tylko zaznaczone, więc dane innych województw nie są ruszane. Pobranie województwa dociąga też granice gmin — dlatego filtr „Miasto/gmina” działa również dla danych pobranych hurtem (przy starszych danych wystarczy raz powtórzyć „Aktualizuj zaznaczone”).</p>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <label>Status
+        <select id="fStatus">
+          <option value="todo">Do dodania w Waze</option>
+          <option value="new">Nowe (od pierwszej synchronizacji)</option>
+          <option value="done">Już dodane</option>
+          <option value="all">Wszystkie</option>
+          <option value="gone">Zniknęły z OSM</option>
+        </select>
+      </label>
+      <label><input type="checkbox" class="fType" value="bump" checked> bump</label>
+      <label><input type="checkbox" class="fType" value="hump" checked> hump</label>
+      <label><input type="checkbox" class="fType" value="table" checked> table</label>
+      <label><input type="checkbox" class="fType" value="cushion" checked> cushion</label>
+      <label>Szukaj <input type="text" id="fSearch" placeholder="ID lub notatka" size="14"></label>
+      <label>Województwo <select id="fWoj"></select></label>
+      <label>Miasto/gmina <input type="text" id="fCity" list="cityList" placeholder="np. Gliwice" size="14"></label>
+      <datalist id="cityList"></datalist>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <label>Okolica: lat <input type="number" step="any" id="fLat" style="width:110px"></label>
+      <label>lon <input type="number" step="any" id="fLon" style="width:110px"></label>
+      <label>promień km <input type="number" id="fRad" value="10" style="width:70px"></label>
+      <button id="btnGeo">Moja lokalizacja</button>
+      <button id="btnClearGeo">Wyczyść</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <b>Mapa bazy</b>
+      <span class="small">Klik w kropkę → podgląd i przełączenie „dodane”. Warstwy włączasz w prawym górnym rogu mapy.</span>
+    </div>
+    <div class="legend">
+      <span><i style="background:#f59e0b"></i>do dodania</span>
+      <span><i style="background:#16a34a"></i>dodane</span>
+      <span><i style="background:#2563eb"></i>nowe (od 1. synchronizacji)</span>
+      <span><i style="background:#dc2626"></i>zniknęły z OSM</span>
+      <span id="mapInfo" class="small"></span>
+    </div>
+    <div id="map" class="placeholder"><span class="small">Mapa wczyta się razem z danymi.</span></div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <span id="count"></span>
+      <span class="row">
+        <button id="prev">←</button><span id="pageInfo"></span><button id="next">→</button>
+        <button id="btnCsv">Eksport CSV (Excel)</button>
+      </span>
+    </div>
+    <div style="overflow-x:auto">
+      <table>
+        <thead><tr><th>Dodany</th><th>Typ</th><th>Współrzędne</th><th>Wykryty</th><th>Linki</th><th>Notatka</th></tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <details>
+      <summary>Nowe progi – ostatnie 14 dni</summary>
+      <div id="perDay" class="small" style="margin-top:8px"></div>
+    </details>
+  </div>
+
+  <div class="card">
+    <details>
+      <summary>Masowe oznaczanie: wklej współrzędne progów, które już masz w Waze</summary>
+      <p class="small">Jedna para na linię (lat, lon). Wszystkie progi z bazy w podanym promieniu zostaną oznaczone jako dodane.</p>
+      <textarea id="bulk" placeholder="50.2945, 18.6714&#10;50.3001, 18.6802"></textarea>
+      <div class="row" style="margin-top:6px">
+        <label>promień m <input type="number" id="bulkRad" value="20" style="width:70px"></label>
+        <button id="btnBulk">Oznacz jako dodane</button>
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <details open>
+      <summary>Wspólna baza na GitHubie (strona ↔ userscript)</summary>
+      <p class="small" style="margin:8px 0">Strona, userscript do WME i plik <code id="pathPreview">data/progi.json</code> w repozytorium to jedna baza. Odczyt działa bez tokenu (repo publiczne), zapis wymaga tokenu GitHub z prawem „Contents: read and write”. Token zostaje tylko w tej przeglądarce.</p>
+      <div class="row">
+        <label>repozytorium <input type="text" id="ghRepo" placeholder="użytkownik/repo" size="26"></label>
+        <label>gałąź <input type="text" id="ghBranch" size="8"></label>
+        <label>plik <input type="text" id="ghPath" size="20"></label>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label>token <input type="password" id="ghToken" placeholder="github_pat_…" size="28" autocomplete="off"></label>
+        <button class="pri" id="btnGhSave">Zapisz i połącz</button>
+        <button class="busy" id="btnGhPull">Pobierz z GitHuba</button>
+        <button class="busy" id="btnGhPush">Wyślij lokalne dane do GitHuba</button>
+      </div>
+      <p class="small" id="ghInfo">—</p>
+    </details>
+  </div>
+
+  <div class="card">
+    <details>
+      <summary>Kopia zapasowa i ustawienia</summary>
+      <div class="row" style="margin-top:8px">
+        <button id="btnBackup">Zapisz kopię (JSON)</button>
+        <button id="btnRestore">Wczytaj kopię</button>
+        <input type="file" id="fileRestore" accept=".json" hidden>
+        <label><input type="checkbox" id="autoUpd" checked> Aktualizuj automatycznie przy otwarciu (raz na 24 h)</label>
+      </div>
+      <p class="small">Dane i Twoje zaznaczenia są zapisane w przeglądarce (IndexedDB) i — jeśli ustawisz repo powyżej — w pliku JSON na GitHubie. Kopia JSON jest przydatna przed czyszczeniem danych przeglądarki.</p>
+    </details>
+  </div>
+</main>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+<script>
+const TYPES={bump:'bump (próg)',hump:'hump (garb)',table:'table (płaski/wyniesiony)',cushion:'cushion (poduszka)'};
+const ENDPOINTS=['https://overpass-api.de/api/interpreter','https://overpass.kumi.systems/api/interpreter','https://overpass.private.coffee/api/interpreter'];
+const PAGE=100;
+const PENDING_MS=5000;              /* ile sekund na cofnięcie „dodane” */
+const $=s=>document.querySelector(s);
+window.addEventListener('error',e=>{$('#status').textContent='Błąd skryptu: '+e.message;});
+window.addEventListener('unhandledrejection',e=>{$('#status').textContent='Błąd: '+((e.reason&&e.reason.message)||e.reason);});
+
+let items=new Map(), page=0, view=[], center=null, db;
+const pending=new Map();            /* id -> {until, timer} */
+let synced={}, selected=[];
+let cfg={owner:'miodeq-ofc',repo:'Hazard',branch:'main',path:'data/progi.json',token:''};
+let pushTimer=null, pushing=false;
+
+/* ================= czyste funkcje (testowane osobno) ================= */
+/*==PURE-START==*/
+const r7=v=>Math.round(v*1e7)/1e7;
+function dist(a,b,c,d){const R=6371000,r=Math.PI/180,dl=(c-a)*r,dn=(d-b)*r;
+  const x=Math.sin(dl/2)**2+Math.cos(a*r)*Math.cos(c*r)*Math.sin(dn/2)**2;return 2*R*Math.asin(Math.sqrt(x));}
+const samePt=(a,b)=>Math.abs(a[0]-b[0])<1e-7&&Math.abs(a[1]-b[1])<1e-7;
+/* skleja odcinki granicy (waye) w zamknięte pierścienie */
+function stitch(segs){
+  const pool=segs.slice(), rings=[];
+  while(pool.length){
+    let ring=pool.shift(), again=true;
+    while(again){
+      again=false;
+      for(let k=0;k<pool.length;k++){
+        const s=pool[k], end=ring[ring.length-1];
+        if(samePt(end,s[0])){ring=ring.concat(s.slice(1));pool.splice(k,1);again=true;break;}
+        if(samePt(end,s[s.length-1])){ring=ring.concat(s.slice(0,-1).reverse());pool.splice(k,1);again=true;break;}
+      }
+    }
+    if(ring.length>3)rings.push(ring);
+  }
+  return rings;
+}
+function pointInRing(lat,lon,ring){
+  let inside=false;
+  for(let i=0,j=ring.length-1;i<ring.length;j=i++){
+    const yi=ring[i][0],xi=ring[i][1],yj=ring[j][0],xj=ring[j][1];
+    if(((yi>lat)!==(yj>lat))&&(lon<(xj-xi)*(lat-yi)/(yj-yi)+xi))inside=!inside;
+  }
+  return inside;
+}
+/* z odpowiedzi Overpass (relacje granic) buduje indeks gmin do przypisania po współrzędnych */
+function buildGminaIndex(els){
+  const out=[];
+  for(const e of els||[]){
+    if(!e||e.type!=='relation'||!e.tags||e.tags.boundary!=='administrative')continue;
+    const nm=e.tags.name; if(!nm)continue;
+    const lvl=parseInt(e.tags.admin_level,10); if(lvl!==7&&lvl!==8)continue;
+    const outer=[],inner=[];
+    for(const m of e.members||[]){
+      if(m.type!=='way'||!m.geometry||!m.geometry.length)continue;
+      const pts=m.geometry.map(p=>[p.lat,p.lon]);
+      (m.role==='inner'?inner:outer).push(pts);
+    }
+    const oR=stitch(outer), iR=stitch(inner);
+    if(!oR.length)continue;
+    let a=90,b=180,c=-90,d=-180;
+    for(const r of oR)for(const p of r){if(p[0]<a)a=p[0];if(p[1]<b)b=p[1];if(p[0]>c)c=p[0];if(p[1]>d)d=p[1];}
+    out.push({name:nm,lvl,bb:[a,b,c,d],outer:oR,inner:iR});
+  }
+  return out;
+}
+function gminaFor(lat,lon,idx){
+  let best=null;
+  for(const g of idx){
+    const bb=g.bb;
+    if(lat<bb[0]||lon<bb[1]||lat>bb[2]||lon>bb[3])continue;
+    let hit=false;
+    for(const r of g.outer)if(pointInRing(lat,lon,r)){hit=true;break;}
+    if(!hit)continue;
+    let inHole=false;
+    for(const r of g.inner)if(pointInRing(lat,lon,r)){inHole=true;break;}
+    if(inHole)continue;
+    if(!best||g.lvl>best.lvl)best=g;
+  }
+  return best?best.name:'';
+}
+/* scalanie dwóch dokumentów bazy: wygrywa rekord z nowszym ts */
+function mergeDocs(a,b){
+  const out={version:2,updated:new Date().toISOString(),synced:{},items:{}};
+  for(const src of [a,b]){
+    if(!src)continue;
+    for(const k of Object.keys(src.synced||{}))out.synced[k]=Math.max(out.synced[k]||0,src.synced[k]||0);
+    for(const id of Object.keys(src.items||{})){
+      const it=src.items[id], cur=out.items[id];
+      if(!cur||(it.ts||0)>=(cur.ts||0))out.items[id]=it;
+    }
+  }
+  return out;
+}
+function b64e(str){
+  const bytes=new TextEncoder().encode(str);
+  let out='';
+  for(let i=0;i<bytes.length;i+=0x8000)out+=String.fromCharCode.apply(null,bytes.subarray(i,i+0x8000));
+  return btoa(out);
+}
+function b64d(b64){
+  const bin=atob(String(b64||'').replace(/\s/g,''));
+  const u=new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++)u[i]=bin.charCodeAt(i);
+  return new TextDecoder().decode(u);
+}
+function stripItem(it){const {_d,...rest}=it;return rest;}
+/*==PURE-END==*/
+
+/* ---------- IndexedDB ---------- */
+function openDb(){return new Promise((res,rej)=>{const r=indexedDB.open('progi-wme',1);
+  r.onupgradeneeded=()=>{const d=r.result;d.createObjectStore('items',{keyPath:'id'});d.createObjectStore('kv');};
+  r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error);});}
+const tx=(st,mode='readonly')=>db.transaction(st,mode).objectStore(st);
+const reqP=r=>new Promise((res,rej)=>{r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error);});
+let mem=false;const memKv={};
+const kvGet=k=>mem?Promise.resolve(memKv[k]):reqP(tx('kv').get(k));
+const kvSet=(k,v)=>mem?Promise.resolve(memKv[k]=v):reqP(tx('kv','readwrite').put(v,k));
+const saveItem=i=>mem?Promise.resolve():reqP(tx('items','readwrite').put(stripItem(i)));
+function saveMany(arr){if(mem||!arr||!arr.length)return Promise.resolve();return new Promise((res,rej)=>{
+  const t=db.transaction('items','readwrite'), s=t.objectStore('items');
+  arr.forEach(i=>s.put(stripItem(i)));t.oncomplete=res;t.onerror=()=>rej(t.error);});}
+
+/* ---------- pomocnicze ---------- */
+const today=()=>new Date().toLocaleDateString('sv-SE');
+const wme=i=>`https://www.waze.com/editor?env=row&lat=${i.lat.toFixed(7)}&lon=${i.lon.toFixed(7)}&zoomLevel=21&marker=true`;
+const osm=i=>`https://www.openstreetmap.org/${i.id[0]==='n'?'node':i.id[0]==='w'?'way':'relation'}/${i.id.slice(1)}`;
+const sv=i=>`https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${i.lat.toFixed(7)},${i.lon.toFixed(7)}`;
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const wait=ms=>new Promise(r=>setTimeout(r,ms));
+function setStatus(s){$('#status').textContent=s;}
+
+/* ---------- województwa ---------- */
+const REGIONS=[['PL-DS','dolnośląskie'],['PL-KP','kujawsko-pomorskie'],['PL-LU','lubelskie'],['PL-LB','lubuskie'],['PL-LD','łódzkie'],['PL-MA','małopolskie'],['PL-MZ','mazowieckie'],['PL-OP','opolskie'],['PL-PK','podkarpackie'],['PL-PD','podlaskie'],['PL-PM','pomorskie'],['PL-SL','śląskie'],['PL-SK','świętokrzyskie'],['PL-WN','warmińsko-mazurskie'],['PL-WP','wielkopolskie'],['PL-ZP','zachodniopomorskie']];
+const RNAME=Object.fromEntries(REGIONS);
+function setBusy(b){document.querySelectorAll('.busy').forEach(x=>x.disabled=b);}
+
+/* ---------- Overpass ---------- */
+async function overpass(q){
+  const errs=[];
+  for(const ep of ENDPOINTS){
+    const host=new URL(ep).host;
+    for(const mode of ['POST','GET']){
+      const ctl=new AbortController(), to=setTimeout(()=>ctl.abort(),300000);
+      try{
+        setStatus(`Pobieram z ${host} (${mode})… może potrwać kilka minut`);
+        const r=mode==='POST'
+          ?await fetch(ep,{method:'POST',signal:ctl.signal,headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'data='+encodeURIComponent(q)})
+          :await fetch(ep+'?data='+encodeURIComponent(q),{signal:ctl.signal});
+        if(!r.ok){
+          errs.push(`${host}: HTTP ${r.status}`);
+          clearTimeout(to);
+          if(r.status!==0)break;
+        }else{
+          const txt=await r.text();clearTimeout(to);
+          try{return JSON.parse(txt);}
+          catch(e){errs.push(`${host}: odpowiedź nie jest JSON (serwer przeciążony?): ${txt.slice(0,80).replace(/\s+/g,' ')}`);break;}
+        }
+      }catch(e){
+        errs.push(`${host} ${mode}: ${e.name==='AbortError'?'przekroczono czas':'połączenie zablokowane/niedostępne'}`);
+      }
+      clearTimeout(to);
+    }
+  }
+  throw new Error(errs.join(' | '));
+}
+
+/* pobiera progi (i — dla całego województwa — granice gmin, żeby działał filtr miasta) */
+async function syncRegion(code,city){
+  const calm='nwr["traffic_calming"~"^(bump|hump|table|cushion)$"]';
+  const reg=`(area["ISO3166-2"="${code}"][admin_level=4];area["boundary"="administrative"][admin_level=4]["name"="województwo ${RNAME[code]}"];)->.w;`;
+  const q=city
+    ?`[out:json][timeout:300];${reg}rel(area.w)["boundary"="administrative"]["name"="${city.replace(/["\\]/g,'')}"]["admin_level"~"^(7|8)$"];map_to_area->.c;${calm}(area.c);out center qt;`
+    :`[out:json][timeout:300];${reg}${calm}(area.w);out center qt;`;
+  const data=await overpass(q);
+  if(data.remark&&/error|timeout|timed out|out of memory|too busy/i.test(data.remark))
+    throw new Error('Overpass zgłosił problem: '+data.remark);
+  if(!city&&(!data.elements||data.elements.length===0))
+    throw new Error('serwer zwrócił 0 obiektów dla '+RNAME[code]+' (błąd zapytania lub przeciążenie serwera) – nic nie zapisano, spróbuj ponownie');
+
+  /* granice gmin – potrzebne tylko przy pobieraniu całego województwa */
+  let idx=[], gErr='';
+  if(!city){
+    try{
+      setStatus(`Pobieram granice gmin: ${RNAME[code]}…`);
+      const g=await overpass(`[out:json][timeout:300];${reg}rel(area.w)["boundary"="administrative"]["admin_level"~"^(7|8)$"]["name"];out geom qt;`);
+      if(g.remark&&/error|timeout|timed out|out of memory|too busy/i.test(g.remark))throw new Error(g.remark);
+      idx=buildGminaIndex(g.elements);
+      if(!idx.length)gErr='serwer nie zwrócił granic gmin';
+    }catch(e){gErr=e.message;}
+  }
+
+  const first=!synced[code], t=today(), seen=new Set(), changed=[];
+  for(const e of data.elements){
+    const lat=e.lat??e.center?.lat, lon=e.lon??e.center?.lon;
+    if(lat==null)continue;
+    const id=e.type[0]+e.id; seen.add(id);
+    const type=e.tags?.traffic_calming;
+    const gmina=city||gminaFor(lat,lon,idx);
+    let it=items.get(id);
+    if(!it){
+      it={id,lat:r7(lat),lon:r7(lon),type,fs:first?'baseline':t,gone:0,done:0,da:'',note:'',w:code,c:gmina||'',ts:Date.now()};
+      items.set(id,it);changed.push(it);
+    }else{
+      let ch=false;
+      if(it.lat!==r7(lat)||it.lon!==r7(lon)||it.type!==type){it.lat=r7(lat);it.lon=r7(lon);it.type=type;ch=true;}
+      if(it.gone){it.gone=0;ch=true;}
+      if(it.w!==code){it.w=code;ch=true;}
+      if(gmina&&it.c!==gmina){it.c=gmina;ch=true;}
+      if(ch){it.ts=Date.now();changed.push(it);}
+    }
+  }
+  if(!city){
+    for(const it of items.values())
+      if(it.w===code&&!seen.has(it.id)&&!it.gone){it.gone=1;it.ts=Date.now();changed.push(it);}
+    synced[code]=Date.now();
+    await kvSet('synced',synced);
+  }
+  await saveMany(changed);
+  if(changed.length){broadcastItems(changed);schedulePush();}
+  return {total:seen.size,added:changed.filter(i=>i.fs===t).length,gminy:idx.length,gErr};
+}
+
+async function refreshSelected(codes){
+  codes=codes||[...document.querySelectorAll('.rChk:checked')].map(x=>x.value);
+  if(!codes.length){alert('Zaznacz co najmniej jedno województwo.');return;}
+  setBusy(true);
+  try{
+    const log=[];
+    for(let k=0;k<codes.length;k++){
+      const c=codes[k];
+      setStatus(`Pobieram: ${RNAME[c]} (${k+1}/${codes.length})… może potrwać do kilku minut`);
+      try{
+        const r=await syncRegion(c);
+        log.push(`${RNAME[c]}: ${r.total}`+(r.added?` (nowych: ${r.added})`:'')+(r.gErr?` ⚠ gminy: ${r.gErr}`:` · gminy: ${r.gminy}`));
+      }catch(e){
+        setStatus(`Błąd przy ${RNAME[c]}: ${e.message}. Spróbuj ponownie za chwilę.`);
+        render();return;
+      }
+      render();
+      if(k<codes.length-1)await wait(2000);
+    }
+    setStatus('Zaktualizowano '+new Date().toLocaleTimeString('pl-PL')+' · '+log.join(' · '));
+  }finally{setBusy(false);}
+}
+
+async function fetchCity(){
+  const name=$('#cityName').value.trim(), code=$('#cityReg').value;
+  if(!name){alert('Wpisz nazwę miasta lub gminy.');return;}
+  setBusy(true);
+  try{
+    setStatus(`Pobieram: ${name} (${RNAME[code]})…`);
+    const r=await syncRegion(code,name);
+    render();
+    if(r.total===0)setStatus(`Brak wyników dla „${name}”. Nazwa musi być taka jak w OSM i miasto musi leżeć w wybranym województwie.`);
+    else setStatus(`${name}: ${r.total} progów`+(r.added?` (nowych: ${r.added})`:''));
+  }catch(e){setStatus('Błąd: '+e.message);}
+  finally{setBusy(false);}
+}
+
+function buildRegions(){
+  $('#regions').innerHTML=REGIONS.map(([c,n])=>`<label class="reg"><input type="checkbox" class="rChk" value="${c}" ${selected.includes(c)?'checked':''}> ${n} <span class="small" id="rc-${c}"></span></label>`).join('');
+  $('#cityReg').innerHTML=REGIONS.map(([c,n])=>`<option value="${c}">${n}</option>`).join('');
+  $('#fWoj').innerHTML='<option value="">wszystkie pobrane</option>'+REGIONS.map(([c,n])=>`<option value="${c}">${n}</option>`).join('');
+  const save=()=>kvSet('sel',[...document.querySelectorAll('.rChk:checked')].map(y=>y.value));
+  document.querySelectorAll('.rChk').forEach(x=>x.onchange=save);
+  $('#rAll').onclick=()=>{document.querySelectorAll('.rChk').forEach(x=>x.checked=true);save();};
+  $('#rNone').onclick=()=>{document.querySelectorAll('.rChk').forEach(x=>x.checked=false);save();};
+}
+function updateRegionInfo(){
+  const cnt={},cities=new Set();
+  for(const i of items.values()){
+    if(i.gone)continue;
+    if(i.w)cnt[i.w]=(cnt[i.w]||0)+1;
+    if(i.c)cities.add(i.c);
+  }
+  REGIONS.forEach(([c])=>{
+    const el=document.getElementById('rc-'+c);
+    if(el)el.textContent=synced[c]?`${cnt[c]||0} · ${new Date(synced[c]).toLocaleDateString('pl-PL')}`:'';
+  });
+  $('#cityList').innerHTML=[...cities].sort((a,b)=>a.localeCompare(b,'pl')).map(c=>`<option value="${esc(c)}">`).join('');
+}
+
+/* ================= chmura: GitHub Contents API ================= */
+const cloudOn=()=>!!(cfg.owner&&cfg.repo&&cfg.path);
+const ghUrl=()=>`https://api.github.com/repos/${cfg.owner}/${cfg.repo}/contents/${cfg.path}`;
+function docFromItems(){
+  const o={version:2,updated:new Date().toISOString(),synced:{...synced},items:{}};
+  for(const [id,it] of items)o.items[id]=stripItem(it);
+  return o;
+}
+function applyDoc(doc){
+  const changed=[];
+  if(!doc)return changed;
+  for(const k of Object.keys(doc.synced||{})){
+    const v=doc.synced[k]||0;
+    if(v>(synced[k]||0)){synced[k]=v;changed.synced=true;}
+  }
+  for(const id of Object.keys(doc.items||{})){
+    const it=doc.items[id]; if(!it||!it.id)continue;
+    const cur=items.get(id);
+    if(!cur||(it.ts||0)>(cur.ts||0)){
+      items.set(id,it);changed.push(it);
+      if((it.done||it.gone)&&pending.has(id)){const p=pending.get(id);clearTimeout(p.timer);pending.delete(id);}
+    }
+  }
+  return changed;
+}
+async function ghRead(){
+  if(!cloudOn())throw new Error('brak konfiguracji repozytorium');
+  if(cfg.token){
+    const r=await fetch(`${ghUrl()}?ref=${encodeURIComponent(cfg.branch||'main')}`,{cache:'no-store',
+      headers:{Authorization:'Bearer '+cfg.token,Accept:'application/vnd.github+json'}});
+    if(r.status===404)return {sha:null,doc:docFromItems()};
+    if(!r.ok)throw new Error('GitHub odczyt: HTTP '+r.status+(r.status===401?' (zły token?)':r.status===403?' (brak uprawnień / limit API?)':''));
+    const j=await r.json();
+    let doc={version:2,synced:{},items:{}};
+    try{doc=JSON.parse(b64d(j.content));}catch(e){throw new Error('Plik w repo nie jest poprawnym JSON-em');}
+    return {sha:j.sha,doc};
+  }
+  const url=`https://raw.githubusercontent.com/${cfg.owner}/${cfg.repo}/${encodeURIComponent(cfg.branch||'main')}/${cfg.path}?t=${Date.now()}`;
+  const r=await fetch(url,{cache:'no-store'});
+  if(r.status===404)return {sha:null,doc:docFromItems()};
+  if(!r.ok)throw new Error('GitHub odczyt (raw): HTTP '+r.status+' – repozytorium musi być publiczne, żeby czytać bez tokenu');
+  return {sha:null,doc:await r.json()};
+}
+async function ghWrite(doc,msg){
+  if(!cfg.token)throw new Error('zapis wymaga tokenu GitHub (ustawienia niżej)');
+  let work=doc;
+  for(let attempt=0;attempt<3;attempt++){
+    const cur=await ghRead();
+    const merged=mergeDocs(cur.doc,work);
+    const body={message:msg||'Aktualizacja bazy progów',branch:cfg.branch||'main',content:b64e(JSON.stringify(merged))};
+    if(cur.sha)body.sha=cur.sha;
+    const r=await fetch(ghUrl(),{method:'PUT',cache:'no-store',
+      headers:{Authorization:'Bearer '+cfg.token,Accept:'application/vnd.github+json','Content-Type':'application/json'},
+      body:JSON.stringify(body)});
+    if(r.status===409||r.status===412||r.status===422){
+      await wait(500+attempt*900);work=merged;continue;
+    }
+    if(!r.ok){
+      let t='';try{t=(await r.text()).slice(0,140);}catch(e){}
+      throw new Error('GitHub zapis: HTTP '+r.status+' '+t);
+    }
+    return merged;
+  }
+  throw new Error('Nie udało się zapisać – plik w repo zmienia się zbyt często, spróbuj za chwilę');
+}
+function cloudInfo(txt,ok){
+  const el=$('#ghInfo'); if(el){el.textContent=txt;el.style.color=ok===false?'var(--bad)':'';}
+  const b=$('#cloudBadge');
+  if(b){b.textContent=cloudOn()?(cfg.token?'GitHub: zapis włączony':'GitHub: tylko odczyt'):'baza lokalna';
+    b.className='badge '+(cloudOn()?'cloud':'local');}
+}
+async function pullRemote(quiet){
+  if(!cloudOn())return false;
+  const cur=await ghRead();
+  const changed=applyDoc(cur.doc);
+  if(changed.length||changed.synced){
+    await saveMany(changed);
+    if(changed.synced)await kvSet('synced',synced);
+    render();
+  }
+  let ahead=0;
+  if(cfg.token){
+    for(const [id,it] of items){const r=cur.doc.items&&cur.doc.items[id];if(!r||(it.ts||0)>(r.ts||0))ahead++;}
+    if(ahead)schedulePush();
+  }
+  const n=Object.keys(cur.doc.items||{}).length;
+  cloudInfo(`Połączono z ${cfg.owner}/${cfg.repo}@${cfg.branch}: ${n} rekordów w pliku`+(ahead&&cfg.token?` · lokalnie nowsze: ${ahead} (wyślę)`:'')+(quiet?'':` · ${new Date().toLocaleTimeString('pl-PL')}`),true);
+  return true;
+}
+async function pushNow(msg){
+  if(!cloudOn()||!cfg.token)throw new Error('zapis wymaga tokenu GitHub');
+  const merged=await ghWrite(docFromItems(),msg);
+  const changed=applyDoc(merged);
+  await saveMany(changed);
+  await kvSet('synced',synced);
+  render();
+  broadcastAll();
+  return merged;
+}
+function schedulePush(){
+  if(!cloudOn()||!cfg.token)return;
+  clearTimeout(pushTimer);
+  pushTimer=setTimeout(async()=>{
+    if(pushing)return;
+    pushing=true;
+    try{
+      const merged=await ghWrite(docFromItems(),'Aktualizacja bazy progów');
+      const changed=applyDoc(merged);
+      await saveMany(changed);
+      if(changed.length)render();
+      cloudInfo(`Zapisano w GitHubie ${new Date().toLocaleTimeString('pl-PL')} · ${Object.keys(merged.items||{}).length} rekordów`,true);
+    }catch(e){
+      cloudInfo('Nie udało się zapisać: '+e.message,false);
+    }finally{pushing=false;}
+  },1500);
+}
+
+/* ---------- most do userscriptu WME + inne karty ---------- */
+let bc=null;
+try{bc=new BroadcastChannel('progi-wme');}catch(e){}
+const PROGI_SRC=/^https:\/\/(www|beta)\.waze\.com$/;
+function postToOpener(msg){
+  if(!window.opener)return;
+  try{window.opener.postMessage(msg,'*');}catch(e){}
+}
+function broadcastItems(arr){
+  const msg={kind:'progi:items',items:(arr||[]).map(stripItem)};
+  if(bc)try{bc.postMessage(msg);}catch(e){}
+  postToOpener(msg);
+}
+function broadcastAll(){
+  const msg={kind:'progi:items',items:[...items.values()].map(stripItem)};
+  if(bc)try{bc.postMessage(msg);}catch(e){}
+  postToOpener(msg);
+}
+async function absorbItems(list){
+  if(!Array.isArray(list))return;
+  const changed=[];
+  for(const it of list){
+    if(!it||!it.id)continue;
+    const cur=items.get(it.id);
+    if(!cur||(it.ts||0)>(cur.ts||0)){items.set(it.id,it);changed.push(it);}
+  }
+  if(changed.length){await saveMany(changed);render();}
+}
+window.addEventListener('message',e=>{
+  const d=e.data;
+  if(!d||typeof d!=='object')return;
+  const fromWme=PROGI_SRC.test(e.origin||'');
+  if(!fromWme&&e.origin!==location.origin)return;
+  if(d.kind==='progi:items')absorbItems(d.items);
+  else if(d.kind==='progi:hello'||d.kind==='progi:request')broadcastAll();
+});
+if(bc)bc.onmessage=e=>{const d=e.data;if(d&&d.kind==='progi:items')absorbItems(d.items);};
+
+/* ---------- widok: filtry ---------- */
+function filtered(){
+  const st=$('#fStatus').value, types=[...document.querySelectorAll('.fType:checked')].map(x=>x.value);
+  const q=$('#fSearch').value.trim().toLowerCase(), rad=(+$('#fRad').value||10)*1000;
+  const out=[];
+  for(const i of items.values()){
+    if(!types.includes(i.type))continue;
+    if(st==='gone'){if(!i.gone)continue;}
+    else{ if(i.gone)continue;
+      if(st==='todo'&&i.done)continue;
+      if(st==='done'&&!i.done)continue;
+      if(st==='new'&&i.fs==='baseline')continue; }
+    if(q&&!(i.id.includes(q)||String(i.note||'').toLowerCase().includes(q)))continue;
+    if($('#fWoj').value&&i.w!==$('#fWoj').value)continue;
+    const cq=$('#fCity').value.trim().toLowerCase();
+    if(cq&&!(i.c||'').toLowerCase().includes(cq))continue;
+    if(center){i._d=dist(center[0],center[1],i.lat,i.lon);if(i._d>rad)continue;}
+    out.push(i);
+  }
+  if(center)out.sort((a,b)=>a._d-b._d);
+  else out.sort((a,b)=>(b.fs==='baseline'?'':b.fs).localeCompare(a.fs==='baseline'?'':a.fs)||a.lat-b.lat);
+  return out;
+}
+
+/* ---------- widok: tabela ---------- */
+function render(){
+  updateRegionInfo();
+  const all=[...items.values()].filter(i=>!i.gone), t=today();
+  const done=all.filter(i=>i.done).length;
+  const stat=(v,l)=>`<div class="stat"><b>${v}</b><span>${l}</span></div>`;
+  $('#stats').innerHTML=stat(all.length,'progów w OSM (aktywne)')+stat(done,'dodane w Waze')+stat(all.length-done,'do dodania')
+    +stat(all.filter(i=>i.fs===t).length,'nowe dzisiaj')+stat(all.filter(i=>i.fs!=='baseline').length,'nowe od 1. synchronizacji')
+    +stat([...items.values()].filter(i=>i.gone).length,'zniknęły z OSM');
+  const days={};for(let k=0;k<14;k++){const d=new Date();d.setDate(d.getDate()-k);days[d.toLocaleDateString('sv-SE')]=0;}
+  all.forEach(i=>{if(i.fs in days)days[i.fs]++;});
+  $('#perDay').innerHTML=Object.entries(days).map(([d,n])=>`${d}: <b>${n}</b>`).join('<br>');
+  view=filtered();
+  const pages=Math.max(1,Math.ceil(view.length/PAGE)); if(page>=pages)page=Math.max(0,pages-1);
+  $('#count').textContent=`${view.length} pozycji`;
+  $('#pageInfo').textContent=`${page+1}/${pages}`;
+  $('#prev').disabled=page===0;$('#next').disabled=page>=pages-1;
+  $('#tbody').innerHTML=view.slice(page*PAGE,(page+1)*PAGE).map(i=>{
+    const p=pending.get(i.id);
+    const left=p?Math.max(0,p.until-Date.now()):0;
+    return `<tr class="${i.done?'done':''} ${i.gone?'gone':''}${p?' pending':''}" data-id="${i.id}"${p?` style="--wait:${left}ms"`:''}>
+      <td style="white-space:nowrap"><input type="checkbox" class="chk" ${i.done||p?'checked':''}><span class="undo small">cofnij</span></td>
+      <td>${esc(TYPES[i.type]||i.type)}<div class="small">${RNAME[i.w]||''}${i.c?' · '+esc(i.c):''}</div></td>
+      <td>${i.lat.toFixed(6)}, ${i.lon.toFixed(6)}${i._d!=null&&center?` <span class="small">(${(i._d/1000).toFixed(2)} km)</span>`:''}</td>
+      <td>${i.fs==='baseline'?'<span class="badge">baza</span>':`<span class="badge ${i.fs===t?'new':''}">${i.fs}</span>`}</td>
+      <td><a href="${wme(i)}" target="_blank" rel="noopener">WME</a><a href="${osm(i)}" target="_blank" rel="noopener">OSM</a><a href="${sv(i)}" target="_blank" rel="noopener">Street View</a><a href="#" class="map-link">mapa</a></td>
+      <td><input class="note" type="text" value="${esc(i.note)}" placeholder="…"></td>
+    </tr>`;}).join('');
+  renderMap();
+}
+
+/* ---------- mapa (Leaflet) ---------- */
+let map=null, groups={}, markers=new Map(), mapTimer=null;
+const MAPSTYLE={todo:{c:'#f59e0b',n:'do dodania'},done:{c:'#16a34a',n:'dodane'},new:{c:'#2563eb',n:'nowe'},gone:{c:'#dc2626',n:'zniknęły z OSM'}};
+function kindOf(i){
+  if(i.gone)return 'gone';
+  if(i.done||pending.has(i.id))return 'done';
+  if(i.fs!=='baseline')return 'new';
+  return 'todo';
+}
+function initMap(){
+  if(map||!window.L)return;
+  const el=$('#map'); el.classList.remove('placeholder'); el.innerHTML='';
+  map=L.map(el,{preferCanvas:true}).setView([52.1,19.4],6);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'&copy; OpenStreetMap'}).addTo(map);
+  groups={};
+  for(const k of Object.keys(MAPSTYLE))groups[k]=L.layerGroup().addTo(map);
+  L.control.layers(null,Object.fromEntries(Object.keys(MAPSTYLE).map(k=>[MAPSTYLE[k].n,groups[k]])),{collapsed:false}).addTo(map);
+  map.on('moveend zoomend',()=>{clearTimeout(mapTimer);mapTimer=setTimeout(renderMap,180);});
+  el.addEventListener('click',async e=>{
+    const btn=e.target.closest('[data-toggle]'); if(!btn)return;
+    e.preventDefault();
+    await toggleDone(btn.dataset.toggle);
+    map.closePopup();
+  });
+}
+function renderMap(){
+  if(!map)return;
+  const z=map.getZoom(), b=map.getBounds();
+  Object.values(groups).forEach(g=>g.clearLayers());
+  markers.clear();
+  if(z<12){$('#mapInfo').textContent='Przybliż mapę (zoom ≥ 12), żeby zobaczyć kropki.';return;}
+  let n=0,skipped=0;
+  const CAP=3000;
+  for(const i of view){
+    if(!b.contains([i.lat,i.lon]))continue;
+    if(n>=CAP){skipped++;continue;}
+    n++;
+    const k=kindOf(i);
+    const m=L.circleMarker([i.lat,i.lon],{radius:5,weight:1,color:'#fff',fillColor:MAPSTYLE[k].c,fillOpacity:.92});
+    m.bindPopup(popupHtml(i));
+    m.addTo(groups[k]);
+    markers.set(i.id,m);
+  }
+  $('#mapInfo').textContent=`${n} kropek w widoku`+(skipped?` (${skipped} pominiętych – przybliż lub zawęź filtry)`:'');
+}
+function popupHtml(i){
+  return `<div style="min-width:190px"><b>${esc(TYPES[i.type]||i.type)}</b><br>
+    ${i.lat.toFixed(6)}, ${i.lon.toFixed(6)}
+    <div class="small" style="color:#667085">${RNAME[i.w]||''}${i.c?' · '+esc(i.c):''}${i.fs!=='baseline'?' · wykryty '+i.fs:''}</div>
+    <div style="margin-top:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button data-toggle="${i.id}" style="border:1px solid #dfe3ea;border-radius:6px;padding:3px 8px;cursor:pointer">${i.done?'Cofnij „dodane”':'Oznacz jako dodane'}</button>
+      <a href="${wme(i)}" target="_blank" rel="noopener" style="color:#2563eb">WME</a>
+      <a href="${osm(i)}" target="_blank" rel="noopener" style="color:#2563eb">OSM</a>
+    </div></div>`;
+}
+function paintMarker(id){
+  const m=markers.get(id), it=items.get(id);
+  if(!m||!it)return;
+  const k=kindOf(it);
+  m.setStyle({fillColor:MAPSTYLE[k].c});
+}
+
+/* ---------- 5-sekundowe okno na cofnięcie „dodane” ---------- */
+function startPending(id,tr){
+  if(pending.has(id))return;
+  const until=Date.now()+PENDING_MS;
+  const timer=setTimeout(()=>commitDone(id),PENDING_MS);
+  pending.set(id,{until,timer});
+  if(tr){tr.classList.add('pending');tr.style.setProperty('--wait',PENDING_MS+'ms');}
+  paintMarker(id);
+}
+function cancelPending(id,tr){
+  const p=pending.get(id);
+  if(p)clearTimeout(p.timer);
+  pending.delete(id);
+  if(tr){tr.classList.remove('pending');tr.style.removeProperty('--wait');const cb=tr.querySelector('.chk');if(cb)cb.checked=false;}
+  paintMarker(id);
+}
+async function commitDone(id){
+  const p=pending.get(id); if(p)clearTimeout(p.timer);
+  pending.delete(id);
+  const it=items.get(id); if(!it)return;
+  it.done=1; it.da=today(); it.ts=Date.now();
+  await saveItem(it);
+  broadcastItems([it]); schedulePush();
+  const tr=document.querySelector(`#tbody tr[data-id="${window.CSS&&CSS.escape?CSS.escape(id):id}"]`);
+  if(tr){tr.classList.remove('pending');tr.classList.add('leaving');setTimeout(()=>render(),340);}
+  else render();
+}
+async function toggleDone(id){
+  const it=items.get(id); if(!it)return;
+  if(pending.has(id)){cancelPending(id,document.querySelector(`#tbody tr[data-id="${window.CSS&&CSS.escape?CSS.escape(id):id}"]`));return;}
+  it.done=it.done?0:1; it.da=it.done?today():''; it.ts=Date.now();
+  await saveItem(it);
+  broadcastItems([it]); schedulePush();
+  render();
+}
+
+/* ---------- zdarzenia ---------- */
+$('#tbody').addEventListener('change',async e=>{
+  const tr=e.target.closest('tr');if(!tr)return;
+  const it=items.get(tr.dataset.id); if(!it)return;
+  if(e.target.classList.contains('chk')){
+    if(e.target.checked){
+      if(!it.done)startPending(it.id,tr);
+    }else{
+      if(pending.has(it.id)){cancelPending(it.id,tr);}
+      else if(it.done){it.done=0;it.da='';it.ts=Date.now();await saveItem(it);broadcastItems([it]);schedulePush();render();}
+    }
+    return;
+  }
+  if(e.target.classList.contains('note')){
+    it.note=e.target.value; it.ts=Date.now();
+    await saveItem(it); broadcastItems([it]); schedulePush();
+  }
+});
+$('#tbody').addEventListener('click',e=>{
+  const a=e.target.closest('.map-link'); if(!a)return;
+  e.preventDefault();
+  const tr=a.closest('tr'), it=items.get(tr.dataset.id); if(!it)return;
+  initMap();
+  map.setView([it.lat,it.lon],18);
+  $('#map').scrollIntoView({behavior:'smooth',block:'center'});
+});
+['#fStatus','#fSearch','#fRad','#fLat','#fLon','#fWoj','#fCity'].forEach(s=>$(s).addEventListener('input',()=>{
+  if(s==='#fLat'||s==='#fLon'||s==='#fRad'){const a=parseFloat($('#fLat').value),b=parseFloat($('#fLon').value);center=(isNaN(a)||isNaN(b))?null:[a,b];}
+  page=0;render();}));
+document.querySelectorAll('.fType').forEach(c=>c.addEventListener('change',()=>{page=0;render();}));
+$('#prev').onclick=()=>{page--;render();};$('#next').onclick=()=>{page++;render();};
+$('#btnRefresh').onclick=()=>refreshSelected();
+$('#btnCity').onclick=fetchCity;
+$('#btnGeo').onclick=()=>navigator.geolocation?.getCurrentPosition(p=>{$('#fLat').value=p.coords.latitude.toFixed(6);$('#fLon').value=p.coords.longitude.toFixed(6);center=[p.coords.latitude,p.coords.longitude];page=0;render();},()=>alert('Brak zgody na lokalizację.'));
+$('#btnClearGeo').onclick=()=>{$('#fLat').value='';$('#fLon').value='';center=null;render();};
+$('#autoUpd').onchange=e=>kvSet('auto',e.target.checked);
+
+$('#btnBulk').onclick=async()=>{
+  const pts=$('#bulk').value.split('\n').map(l=>l.match(/-?\d+[.,]\d+/g)).filter(m=>m&&m.length>=2).map(m=>[parseFloat(m[0].replace(',','.')),parseFloat(m[1].replace(',','.'))]);
+  const r=+$('#bulkRad').value||20, changed=[];
+  for(const i of items.values()){ if(i.done||i.gone)continue;
+    if(pts.some(p=>dist(p[0],p[1],i.lat,i.lon)<=r)){i.done=1;i.da=today();i.ts=Date.now();changed.push(i);} }
+  await saveMany(changed); broadcastItems(changed); schedulePush(); render();
+  alert(`Wczytano ${pts.length} punktów, oznaczono ${changed.length} progów jako dodane.`);
+};
+
+$('#btnCsv').onclick=()=>{
+  const rows=[['ID','Typ','Lat','Lon','Dodany w Waze','Data dodania','Wykryty','Notatka','Województwo','Miasto','WME','OSM']];
+  view.forEach(i=>rows.push([i.id,i.type,i.lat,i.lon,i.done?'TAK':'NIE',i.da,i.fs==='baseline'?'':i.fs,i.note,RNAME[i.w]||'',i.c||'',wme(i),osm(i)]));
+  const csv='\ufeff'+rows.map(r=>r.map(v=>'"'+String(v).replace(/"/g,'""')+'"').join(';')).join('\r\n');
+  dl(new Blob([csv],{type:'text/csv;charset=utf-8'}),`progi-${today()}.csv`);
+};
+$('#btnBackup').onclick=()=>{
+  const d=[...items.values()].map(stripItem);
+  dl(new Blob([JSON.stringify(d)],{type:'application/json'}),`progi-kopia-${today()}.json`);
+};
+$('#btnRestore').onclick=()=>$('#fileRestore').click();
+$('#fileRestore').onchange=async e=>{
+  const f=e.target.files[0];if(!f)return;
+  try{
+    const arr=JSON.parse(await f.text());
+    const list=Array.isArray(arr)?arr:Object.values(arr.items||{});
+    const changed=list.map(i=>({...i,ts:i.ts||Date.now()}));
+    changed.forEach(i=>items.set(i.id,i));
+    await saveMany(changed); broadcastItems(changed); schedulePush(); render();
+    alert('Wczytano '+changed.length+' rekordów.');
+  }catch(err){alert('Nieprawidłowy plik: '+err.message);}
+};
+function dl(blob,name){const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),5000);}
+
+/* ---------- ustawienia chmury ---------- */
+function fillCloudUi(){
+  $('#ghRepo').value=cfg.owner&&cfg.repo?`${cfg.owner}/${cfg.repo}`:'';
+  $('#ghBranch').value=cfg.branch||'main';
+  $('#ghPath').value=cfg.path||'data/progi.json';
+  $('#ghToken').value=cfg.token||'';
+  $('#pathPreview').textContent=cfg.path||'data/progi.json';
+  cloudInfo(cloudOn()
+    ? (cfg.token?'Zapis do GitHuba włączony. Zmiany wysyłane są automatycznie ~1,5 s po kliknięciu.':'Odczyt z GitHuba działa; żeby zapisywać, wklej token.')
+    : 'Wpisz repozytorium (np. miodeq-ofc/Hazard), żeby dzielić bazę ze userscriptem.');
+}
+$('#btnGhSave').onclick=async()=>{
+  const repo=$('#ghRepo').value.trim().replace(/^https?:\/\/github\.com\//,'').replace(/\.git$/,'');
+  if(repo&&!/^[\w.-]+\/[\w.-]+$/.test(repo)){alert('Podaj repozytorium w formacie użytkownik/repo');return;}
+  cfg.owner=repo?repo.split('/')[0]:'';
+  cfg.repo=repo?repo.split('/')[1]:'';
+  cfg.branch=$('#ghBranch').value.trim()||'main';
+  cfg.path=$('#ghPath').value.trim()||'data/progi.json';
+  cfg.token=$('#ghToken').value.trim();
+  await kvSet('cfg',cfg);
+  fillCloudUi();
+  if(!cloudOn())return;
+  setBusy(true);
+  try{ await pullRemote(); setStatus('Połączono z bazą na GitHubie.'); }
+  catch(e){ cloudInfo('Błąd: '+e.message,false); }
+  finally{ setBusy(false); }
+};
+$('#btnGhPull').onclick=async()=>{
+  if(!cloudOn()){alert('Najpierw ustaw repozytorium.');return;}
+  setBusy(true);
+  try{ await pullRemote(); setStatus('Pobrano bazę z GitHuba.'); }
+  catch(e){ cloudInfo('Błąd: '+e.message,false); }
+  finally{ setBusy(false); }
+};
+$('#btnGhPush').onclick=async()=>{
+  if(!cloudOn()||!cfg.token){alert('Zapis wymaga tokenu GitHub.');return;}
+  setBusy(true);
+  try{ await pushNow('Wgranie lokalnej bazy'); setStatus('Wysłano bazę do GitHuba.'); }
+  catch(e){ cloudInfo('Błąd: '+e.message,false); }
+  finally{ setBusy(false); }
+};
+
+/* ---------- start ---------- */
+(async()=>{
+  try{
+    db=await Promise.race([openDb(),new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),4000))]);
+    const all=await reqP(tx('items').getAll());all.forEach(i=>items.set(i.id,i));
+  }catch(e){mem=true;}
+  synced=(await kvGet('synced'))||{};
+  selected=(await kvGet('sel'))||['PL-SL'];
+  cfg={...cfg, ...((await kvGet('cfg'))||{})};
+  buildRegions();
+  fillCloudUi();
+  initMap();
+  const auto=await kvGet('auto');$('#autoUpd').checked=auto!==false;
+  setStatus(mem
+    ?'UWAGA: ta przeglądarka blokuje zapis danych – nic nie zostanie zapamiętane po zamknięciu.'
+    :(cloudOn()?'Baza połączona z GitHubem. Zaznacz województwa i kliknij „Aktualizuj zaznaczone”.'
+               :'Zaznacz województwa i kliknij „Aktualizuj zaznaczone”.'));
+  render();
+  if(cloudOn()){
+    pullRemote().catch(e=>cloudInfo('Nie udało się połączyć: '+e.message,false));
+    setInterval(()=>{
+      if(document.visibilityState==='visible'&&!pushing) pullRemote(true).catch(()=>{});
+    },20000);
+  }
+  if($('#autoUpd').checked){
+    const due=selected.filter(c=>!synced[c]||Date.now()-synced[c]>864e5);
+    if(due.length)refreshSelected(due);
+  }
+  /* strona otwarta z panelu WME → od razu podaj dane userscriptowi */
+  if(window.opener)postToOpener({kind:'progi:hello'});
+})();
+</script>
+</body>
+</html>
