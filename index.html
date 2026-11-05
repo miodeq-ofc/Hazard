@@ -3,7 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Progi zwalniające</title>
+<title>Progi zwalniające → WME</title>
+<meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
 <style>
   :root{--bg:#f6f7f9;--card:#fff;--tx:#1d2330;--mut:#667085;--bd:#dfe3ea;--ac:#2563eb;--ok:#16a34a;--new:#f59e0b;--bad:#dc2626}
@@ -52,8 +55,14 @@
   tr.leaving{animation:leaveOut .34s ease forwards}
   @keyframes leaveOut{to{opacity:0;transform:translateX(14px)}}
   /* --- mapa --- */
-  #map{height:480px;border-radius:8px;overflow:hidden;border:1px solid var(--bd);background:#e8eaee}
+  #map{height:560px;border-radius:8px;overflow:hidden;border:1px solid var(--bd);background:#e8eaee}
   #map.placeholder{display:flex;align-items:center;justify-content:center}
+  .selbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;padding:8px 10px;border:1px solid var(--bd);border-radius:8px;background:var(--card)}
+  .selbar[hidden]{display:none}
+  .selbar .grow{flex:1 1 auto}
+  tbody tr.bad{background:rgba(124,58,237,.06)}
+  tbody tr.bad td{color:#6b7280}
+  .badge.err{background:#ede9fe;color:#6d28d9}
   .legend{display:flex;gap:14px;flex-wrap:wrap;align-items:center;font-size:12px;color:var(--mut);margin:0 0 8px}
   .legend i{display:inline-block;width:11px;height:11px;border-radius:50%;margin-right:5px;vertical-align:-1px}
   .leaflet-container{font:inherit}
@@ -80,8 +89,9 @@
 </head>
 <body>
 <header>
-  <h1>Progi zwalniające w Polsce</h1>
+  <h1>Progi zwalniające w Polsce → WME</h1>
   <span class="badge" id="cloudBadge">baza lokalna</span>
+  <span class="badge" id="ver" title="wersja pliku – po wgraniu nowej powinna się zmienić">v04.11.2026c</span>
   <span id="status">Ładowanie…</span>
 </header>
 <main>
@@ -112,6 +122,7 @@
           <option value="todo">Do dodania w Waze</option>
           <option value="new">Nowe (od pierwszej synchronizacji)</option>
           <option value="done">Już dodane</option>
+          <option value="bad">Błędne (nie ma w OSM)</option>
           <option value="all">Wszystkie</option>
           <option value="gone">Zniknęły z OSM</option>
         </select>
@@ -143,15 +154,22 @@
         <span class="small" id="mapFind"></span>
       </span>
     </div>
-    <p class="small" style="margin:0 0 8px">Klik w kropkę → podgląd i przełączenie „dodane”. Warstwy włączasz w prawym górnym rogu mapy. Wyszukiwarka tylko przenosi widok — niczego nie zaznacza.</p>
+    <p class="small" style="margin:0 0 8px">Klik w kropkę → podgląd i przełączenie „dodane”. <b>Ctrl+Shift + przeciągnięcie</b> zaznacza prostokąt z kilkoma progami i pozwala oznaczyć je hurtem. W popupie możesz też oznaczyć próg jako <b>błędny</b> (był w terenie, ale nie ma go w OSM) — takie progi są fioletowe. Warstwy włączasz w prawym górnym rogu mapy. Wyszukiwarka tylko przenosi widok — niczego nie zaznacza.</p>
     <div class="legend">
       <span><i style="background:#f59e0b"></i>do dodania</span>
       <span><i style="background:#16a34a"></i>dodane</span>
+      <span><i style="background:#7c3aed"></i>błędne (brak w OSM)</span>
       <span><i style="background:#2563eb"></i>nowe (od 1. synchronizacji)</span>
       <span><i style="background:#dc2626"></i>zniknęły z OSM</span>
       <span id="mapInfo" class="small"></span>
     </div>
     <div id="map" class="placeholder"><span class="small">Mapa wczyta się razem z danymi.</span></div>
+    <div id="selBar" class="selbar" hidden>
+      <span id="selInfo" class="small grow"></span>
+      <button class="pri" id="selDone">Oznacz jako dodane</button>
+      <button id="selClear">Wyczyść zaznaczenie</button>
+      <button id="selUndo" hidden>Cofnij</button>
+    </div>
   </div>
 
   <div class="card">
@@ -665,7 +683,8 @@ function filtered(ignoreStatus){
     if(!ignoreStatus){
       if(st==='gone'){if(!i.gone)continue;}
       else{ if(i.gone)continue;
-        if(st==='todo'&&i.done)continue;
+        if(st==='todo'&&(i.done||i.bad))continue;
+        if(st==='bad'&&!i.bad)continue;
         if(st==='done'&&!i.done)continue;
         if(st==='new'&&i.fs==='baseline')continue; }
     }
@@ -685,9 +704,9 @@ function filtered(ignoreStatus){
 function render(){
   updateRegionInfo();
   const all=[...items.values()].filter(i=>!i.gone), t=today();
-  const done=all.filter(i=>i.done).length;
+  const done=all.filter(i=>i.done).length, bad=all.filter(i=>i.bad&&!i.done).length;
   const stat=(v,l)=>`<div class="stat"><b>${v}</b><span>${l}</span></div>`;
-  $('#stats').innerHTML=stat(all.length,'progów w OSM (aktywne)')+stat(done,'dodane w Waze')+stat(all.length-done,'do dodania')
+  $('#stats').innerHTML=stat(all.length,'progów w OSM (aktywne)')+stat(done,'dodane w Waze')+stat(all.length-done-bad,'do dodania')+stat(bad,'błędne (brak w OSM)')
     +stat(all.filter(i=>i.fs===t).length,'nowe dzisiaj')+stat(all.filter(i=>i.fs!=='baseline').length,'nowe od 1. synchronizacji')
     +stat([...items.values()].filter(i=>i.gone).length,'zniknęły z OSM');
   const days={};for(let k=0;k<14;k++){const d=new Date();d.setDate(d.getDate()-k);days[d.toLocaleDateString('sv-SE')]=0;}
@@ -703,9 +722,9 @@ function render(){
   $('#tbody').innerHTML=view.slice(page*PAGE,(page+1)*PAGE).map(i=>{
     const p=pending.get(i.id);
     const left=p?Math.max(0,p.until-Date.now()):0;
-    return `<tr class="${i.done?'done':''} ${i.gone?'gone':''}${p?' pending':''}" data-id="${i.id}"${p?` style="--wait:${left}ms"`:''}>
+    return `<tr class="${i.done?'done':''} ${i.gone?'gone':''}${i.bad?' bad':''}${p?' pending':''}" data-id="${i.id}"${p?` style="--wait:${left}ms"`:''}>
       <td style="white-space:nowrap"><input type="checkbox" class="chk" ${i.done||p?'checked':''}><span class="undo small">cofnij</span></td>
-      <td>${esc(TYPES[i.type]||i.type)}<div class="small">${RNAME[i.w]||''}${i.c?' · '+esc(i.c):''}</div></td>
+      <td>${i.bad?'<span class="badge err">błędny</span> ':''}${esc(TYPES[i.type]||i.type)}<div class="small">${RNAME[i.w]||''}${i.c?' · '+esc(i.c):''}</div></td>
       <td>${i.lat.toFixed(6)}, ${i.lon.toFixed(6)}${i._d!=null&&center?` <span class="small">(${(i._d/1000).toFixed(2)} km)</span>`:''}</td>
       <td>${i.fs==='baseline'?'<span class="badge">baza</span>':`<span class="badge ${i.fs===t?'new':''}">${i.fs}</span>`}</td>
       <td><a href="${wme(i)}" target="_blank" rel="noopener">WME</a><a href="${osm(i)}" target="_blank" rel="noopener">OSM</a><a href="${sv(i)}" target="_blank" rel="noopener">Street View</a><a href="#" class="map-link">mapa</a></td>
@@ -716,9 +735,10 @@ function render(){
 
 /* ---------- mapa (Leaflet) ---------- */
 let map=null, groups={}, markers=new Map(), mapTimer=null;
-const MAPSTYLE={todo:{c:'#f59e0b',n:'do dodania'},done:{c:'#16a34a',n:'dodane'},new:{c:'#2563eb',n:'nowe'},gone:{c:'#dc2626',n:'zniknęły z OSM'}};
+const MAPSTYLE={todo:{c:'#f59e0b',n:'do dodania'},done:{c:'#16a34a',n:'dodane'},new:{c:'#2563eb',n:'nowe'},bad:{c:'#7c3aed',n:'błędne (brak w OSM)'},gone:{c:'#dc2626',n:'zniknęły z OSM'}};
 function kindOf(i){
   if(i.gone)return 'gone';
+  if(i.bad)return 'bad';
   if(i.done||pending.has(i.id))return 'done';
   if(i.fs!=='baseline')return 'new';
   return 'todo';
@@ -732,7 +752,33 @@ function initMap(){
   for(const k of Object.keys(MAPSTYLE))groups[k]=L.layerGroup().addTo(map);
   L.control.layers(null,Object.fromEntries(Object.keys(MAPSTYLE).map(k=>[MAPSTYLE[k].n,groups[k]])),{collapsed:false}).addTo(map);
   map.on('moveend zoomend',()=>{clearTimeout(mapTimer);mapTimer=setTimeout(renderMap,180);});
+  const inside=e=>map.getContainer().contains(e.target)&&!!(e.shiftKey&&(e.ctrlKey||e.metaKey));
+  document.addEventListener('mousedown',e=>{
+    if(!map||e.button!==0||!inside(e))return;
+    e.preventDefault(); e.stopPropagation();          /* nie pozwalamy Leafletowi na przesuwanie mapy */
+    selDrag=true; selStart=map.mouseEventToLatLng(e);
+    if(map.dragging)map.dragging.disable();
+    if(map.boxZoom)map.boxZoom.disable();
+    if(selRect){map.removeLayer(selRect);}
+    selRect=L.rectangle(L.latLngBounds(selStart,selStart),{color:'#2563eb',weight:1,fillOpacity:.14,interactive:false}).addTo(map);
+    map.closePopup();
+  },true);
+  document.addEventListener('mousemove',e=>{
+    if(!selDrag||!map)return;
+    e.preventDefault();
+    const cur=map.mouseEventToLatLng(e);
+    selRect.setBounds(L.latLngBounds(selStart,cur));
+  },true);
+  document.addEventListener('mouseup',e=>{
+    if(!selDrag||!map)return;
+    selDrag=false;
+    if(map.dragging)map.dragging.enable();
+    if(map.boxZoom)map.boxZoom.enable();
+    applySelection(selStart,map.mouseEventToLatLng(e));
+  },true);
   el.addEventListener('click',async e=>{
+    const badBtn=e.target.closest('[data-bad]');
+    if(badBtn){e.preventDefault();if(items.get(badBtn.dataset.bad))await toggleBad(badBtn.dataset.bad);map.closePopup();return;}
     const btn=e.target.closest('[data-toggle]'); if(!btn)return;
     e.preventDefault();
     const id=btn.dataset.toggle, it=items.get(id);
@@ -771,6 +817,7 @@ function popupHtml(i){
     <div class="small" style="color:#667085">${RNAME[i.w]||''}${i.c?' · '+esc(i.c):''}${i.fs!=='baseline'?' · wykryty '+i.fs:''}</div>
     <div style="margin-top:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       <button data-toggle="${i.id}" style="border:1px solid #dfe3ea;border-radius:6px;padding:3px 8px;cursor:pointer">${pending.has(i.id)?'Cofnij':i.done?'Cofnij „dodane”':'Oznacz jako dodane'}</button>
+      <button data-bad="${i.id}" title="Baza OSM nie jest kompletna – próg był w terenie, ale nie ma go w OSM" style="border:1px solid ${i.bad?'#c4b5fd':'#dfe3ea'};background:${i.bad?'#ede9fe':'#fff'};color:${i.bad?'#6d28d9':'#111'};border-radius:6px;padding:3px 8px;cursor:pointer">${i.bad?'Cofnij „błędne”':'Oznacz jako błędne'}</button>
       <a href="${wme(i)}" target="_blank" rel="noopener" style="color:#2563eb">WME</a>
       <a href="${osm(i)}" target="_blank" rel="noopener" style="color:#2563eb">OSM</a>
     </div></div>`;
@@ -780,6 +827,11 @@ function paintMarker(id){
   if(!m||!it)return;
   const k=kindOf(it);
   m.setStyle({fillColor:MAPSTYLE[k].c});
+}
+/* zielona kropka nie może wpaść do warstwy, którą użytkownik ma wyłączoną w panelu warstw */
+function ensureLayerVisible(k){
+  if(!map||!groups[k])return;
+  if(!map.hasLayer(groups[k]))map.addLayer(groups[k]);
 }
 const rowFor=id=>document.querySelector(`#tbody tr[data-id="${window.CSS&&CSS.escape?CSS.escape(id):id}"]`);
 /* wyszukiwarka miejsc: tylko przenosi mapę, niczego nie zaznacza */
@@ -803,12 +855,71 @@ async function findPlace(){
 $('#btnMapGo').onclick=findPlace;
 $('#mapQ').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();findPlace();}});
 
+/* ---------- zaznaczanie prostokątem (Ctrl+Shift + przeciągnięcie) ---------- */
+let selRect=null, selIds=[], selPrev=null, selDrag=false, selStart=null;
+function progi(n){
+  const d=n%10, h=n%100;
+  if(n===1)return '1 próg';
+  if(d>=2&&d<=4&&!(h>=12&&h<=14))return n+' progi';
+  return n+' progów';
+}
+function showSelBar(mode,text){
+  const bar=$('#selBar'); bar.hidden=false;
+  $('#selInfo').textContent=text||'';
+  $('#selDone').hidden=mode!=='pick';
+  $('#selClear').hidden=mode!=='pick';
+  $('#selUndo').hidden=mode!=='undo';
+}
+function hideSelBar(){$('#selBar').hidden=true;$('#selInfo').textContent='';}
+function clearSelection(){
+  if(selRect&&map){map.removeLayer(selRect);}
+  selRect=null; selIds=[]; hideSelBar();
+  if(map)renderMap();
+}
+function applySelection(a,b){
+  if(!map)return;
+  const bounds=L.latLngBounds(a,b);
+  selIds=[];
+  for(const [id,m] of markers){
+    const it=items.get(id);
+    if(!it||it.done||it.bad||pending.has(id))continue;
+    if(bounds.contains(m.getLatLng()))selIds.push(id);
+  }
+  for(const [id,m] of markers){
+    const on=selIds.includes(id);
+    m.setStyle({weight:on?2.5:1,color:on?'#111827':'#fff',radius:on?6:5});
+  }
+  if(!selIds.length){ if(selRect&&map)map.removeLayer(selRect); selRect=null; showSelBar('none','Ramka nie objęła żadnego progu do oznaczenia (te już dodane, błędne i poza ramką są pomijane).'); return; }
+  showSelBar('pick',`Zaznaczono ${progi(selIds.length)} (nieoznaczonych jako dodane)`);
+}
+$('#selClear').onclick=()=>clearSelection();
+$('#selDone').onclick=async()=>{
+  const ids=selIds.slice(); if(!ids.length)return;
+  selPrev=ids.map(id=>{const it=items.get(id);return {id,done:(it&&it.done)||0,da:(it&&it.da)||''};});
+  const changed=[];
+  for(const id of ids){const it=items.get(id);if(!it||it.done)continue;it.done=1;it.da=today();it.ts=Date.now();changed.push(it);}
+  ensureLayerVisible('done');
+  await saveMany(changed); broadcastItems(changed); schedulePush();
+  if(selRect&&map){map.removeLayer(selRect);} selRect=null; selIds=[];
+  render();
+  showSelBar('undo',`Oznaczono ${progi(changed.length)} jako dodane`);
+  setStatus(`Oznaczono ${progi(changed.length)} jako dodane w Waze.`);
+};
+$('#selUndo').onclick=async()=>{
+  if(!selPrev||!selPrev.length)return;
+  const changed=[];
+  for(const p of selPrev){const it=items.get(p.id);if(!it)continue;it.done=p.done;it.da=p.da;it.ts=Date.now();changed.push(it);}
+  selPrev=null; hideSelBar();
+  await saveMany(changed); broadcastItems(changed); schedulePush(); render();
+  setStatus('Cofnięto zbiorcze oznaczenie.');
+};
 /* ---------- 5-sekundowe okno na cofnięcie „dodane” ---------- */
 function startPending(id,tr){
   if(pending.has(id))return;
   const until=Date.now()+PENDING_MS;
   const timer=setTimeout(()=>commitDone(id),PENDING_MS);
   pending.set(id,{until,timer});
+  ensureLayerVisible('done');   /* kropka ma zrobić się zielona, nie zniknąć */
   if(tr){tr.classList.add('pending');tr.style.setProperty('--wait',PENDING_MS+'ms');}
   paintMarker(id);
 }
@@ -823,17 +934,27 @@ async function commitDone(id){
   const p=pending.get(id); if(p)clearTimeout(p.timer);
   pending.delete(id);
   const it=items.get(id); if(!it)return;
-  it.done=1; it.da=today(); it.ts=Date.now();
+  it.done=1; it.da=today(); it.ts=Date.now(); ensureLayerVisible('done');
   await saveItem(it);
   broadcastItems([it]); schedulePush();
   const tr=document.querySelector(`#tbody tr[data-id="${window.CSS&&CSS.escape?CSS.escape(id):id}"]`);
   if(tr){tr.classList.remove('pending');tr.classList.add('leaving');setTimeout(()=>render(),340);}
   else render();
 }
+async function toggleBad(id){
+  const it=items.get(id); if(!it)return;
+  if(it.bad){it.bad=0;}
+  else{it.bad=1;it.done=0;it.da='';}
+  it.ts=Date.now();
+  await saveItem(it);
+  broadcastItems([it]); schedulePush();
+  ensureLayerVisible(it.bad?'bad':'todo');
+  render();
+}
 async function toggleDone(id){
   const it=items.get(id); if(!it)return;
   if(pending.has(id)){cancelPending(id,document.querySelector(`#tbody tr[data-id="${window.CSS&&CSS.escape?CSS.escape(id):id}"]`));return;}
-  it.done=it.done?0:1; it.da=it.done?today():''; it.ts=Date.now();
+  it.done=it.done?0:1; it.da=it.done?today():''; it.ts=Date.now(); if(it.done){it.bad=0;ensureLayerVisible('done');}
   await saveItem(it);
   broadcastItems([it]); schedulePush();
   render();
@@ -879,7 +1000,7 @@ $('#autoUpd').onchange=e=>kvSet('auto',e.target.checked);
 $('#btnBulk').onclick=async()=>{
   const pts=$('#bulk').value.split('\n').map(l=>l.match(/-?\d+[.,]\d+/g)).filter(m=>m&&m.length>=2).map(m=>[parseFloat(m[0].replace(',','.')),parseFloat(m[1].replace(',','.'))]);
   const r=+$('#bulkRad').value||20, changed=[];
-  for(const i of items.values()){ if(i.done||i.gone)continue;
+  for(const i of items.values()){ if(i.done||i.gone||i.bad)continue;
     if(pts.some(p=>dist(p[0],p[1],i.lat,i.lon)<=r)){i.done=1;i.da=today();i.ts=Date.now();changed.push(i);} }
   await saveMany(changed); broadcastItems(changed); schedulePush(); render();
   alert(`Wczytano ${pts.length} punktów, oznaczono ${changed.length} progów jako dodane.`);
