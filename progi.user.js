@@ -103,7 +103,7 @@
     return btoa(out);
   }
   function b64d(b64) {
-    const bin = atob(String(b64 || '').replace(/\\s/g, ''));
+    const bin = atob(String(b64 || '').replace(/\s/g, ''));
     const u = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
     return new TextDecoder().decode(u);
@@ -476,8 +476,8 @@
     box.querySelector('[data-push]').onclick = () => pushNow('Ręczna aktualizacja bazy progów (WME)').catch(e => toast(e.message));
     box.querySelector('[data-vis]').onchange = e => { cfg.visible = e.target.checked; setCfg(); setVisibility(cfg.visible); };
     box.querySelector('[data-save]').onclick = async () => {
-      const repo = box.querySelector('[data-cfg="repo"]').value.trim().replace(/^https?:\\/\\/github\\.com\\//, '').replace(/\\.git$/, '');
-      if (repo && !/^[\\w.-]+\\/[\\w.-]+$/.test(repo)) { toast('Podaj repo jako użytkownik/repo'); return; }
+      const repo = box.querySelector('[data-cfg="repo"]').value.trim().replace(/^https?:\/\/github\.com\//, '').replace(/\.git$/, '');
+      if (repo && !/^[\w.-]+\/[\w.-]+$/.test(repo)) { toast('Podaj repo jako użytkownik/repo'); return; }
       if (repo) { cfg.owner = repo.split('/')[0]; cfg.repo = repo.split('/')[1]; }
       cfg.branch = box.querySelector('[data-cfg="branch"]').value.trim() || 'main';
       cfg.path = box.querySelector('[data-cfg="path"]').value.trim() || 'data/progi.json';
