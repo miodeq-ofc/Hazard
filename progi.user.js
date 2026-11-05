@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Progi zwalniające – warstwa WME
 // @namespace    https://github.com/miodeq-ofc/Hazard
-// @version      2.3.1
+// @version      2.3.2
 // @description  Kropki progów zwalniających z OSM na mapie WME + wspólna baza JSON na GitHubie, zsynchronizowana ze stroną (index.html). Alt+klik = „dodane”, Alt+Shift+klik = „błędne”. Menu w Layers.
 // @author       miodeq
 // @match        *://*.waze.com/*editor*
@@ -19,22 +19,22 @@
 // @supportURL   https://github.com/miodeq-ofc/Hazard
 // ==/UserScript==
 
-/*  Progi zwalniające – warstwa WME (2.3.1)
+/*  Progi zwalniające – warstwa WME (2.3.2)
 
     JAK RYSUJE:
     - kropki to NAKŁADKA DOM (div z kropkami) przyklejona do viewportu mapy,
       a nie warstwa wektorowa SDK — dlatego są NAD segmentami, ikonami ostrzeżeń
       i wszystkim innym, co rysuje WME
-    - rozmiar zależny od przybliżenia: 34 px przy oddaleniu (zoom ≤ 15), 32 px na 16,
-      30 px od zoomu 17 w górę; biała obwódka + ciemna aureola, więc widać je na każdym tle
+    - rozmiar zależny od przybliżenia: DOT_LOW przy oddaleniu (zoom ≤ 15), średnia z obu na 16,
+      DOT_HIGH od zoomu 17 w górę; biała obwódka + ciemna aureola, więc widać je na każdym tle
     - klik w kropkę łapie kropka (element DOM), więc segment pod spodem się nie zaznacza
     - najechanie = pasek u góry z typem, stanem i datą dodania z OSM
       (daty nie ma w bazie, więc dociągam ją z api.openstreetmap.org wersja 1 i zapamiętuję)
 
     STEROWANIE:
     - Alt + klik = „dodane”, Alt + Shift + klik = „błędne”, sam klik = przypnij info
-    - każda zmiana zapisuje się SAMA do GitHuba (0,3 s po kliknięciu);
-      jeśli sieć zawiedzie, skrypt ponawia co 15 s
+    - zmiany zbierają się w tle i wysyłają SAME do GitHuba raz na 5 minut
+      (albo od razu przyciskiem „Wyślij”); po błędzie sieci próbuje w kolejnym cyklu
     - menu jest w Layers („Progi by Miodeq”): filtry, licznik, Ustawienia bazy
 
     AKTUALIZACJE: Tampermonkey sam sprawdza @updateURL; po zmianie pliku podbij @version.
@@ -43,7 +43,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '2.3.1';
+  const VERSION = '2.3.2';
   const DEFAULTS = {
     owner: 'miodeq-ofc',
     repo: 'Hazard',
@@ -67,6 +67,7 @@
   const MAX_DOTS = 900;     // ile kropek maksymalnie w jednym widoku
   const OSM_API = 'https://api.openstreetmap.org/api/0.6/';
   const Z_OVERLAY = 9000;   // ponad pane'ami mapy WME
+  const SYNC_MS = 5 * 60 * 1000; // auto-zapis bazy: raz na 5 minut, nie po każdym kliknięciu
 
   let cfg = { ...DEFAULTS };
   const items = new Map();
@@ -198,7 +199,20 @@
       if (r.status === 404) return { sha: null, doc: docFromItems() };
       if (r.status < 200 || r.status >= 300) throw new Error('GitHub odczyt: HTTP ' + r.status + (r.status === 401 ? ' (zły token)' : r.status === 403 ? ' (brak uprawnień / limit)' : ''));
       const j = await r.json();
-      return { sha: j.sha, doc: JSON.parse(b64d(j.content)) };
+      // Contents API nie zwraca treści plików > 1 MB (content: "", encoding: "none") –
+      // wtedy czytamy ten sam plik przez download_url (raw), a sha zostaje z API (potrzebne do zapisu).
+      let text = '';
+      if (j && j.content && j.encoding !== 'none') { try { text = b64d(j.content); } catch (e) { text = ''; } }
+      if (!text) {
+        const rawUrl = (j && j.download_url ? j.download_url
+          : 'https://raw.githubusercontent.com/' + cfg.owner + '/' + cfg.repo + '/' + encodeURIComponent(cfg.branch || 'main') + '/' + cfg.path) + '?t=' + Date.now();
+        const rr = await httpJson('GET', rawUrl, { Accept: 'application/json' });
+        if (rr.status >= 200 && rr.status < 300) return { sha: j.sha, doc: await rr.json() };
+        throw new Error('plik bazy jest duży (> 1 MB) i GitHub nie zwrócił treści; surowy odczyt: HTTP ' + rr.status);
+      }
+      let doc;
+      try { doc = JSON.parse(text); } catch (e) { throw new Error('Plik w repo nie jest poprawnym JSON-em'); }
+      return { sha: j.sha, doc };
     }
     const url = 'https://raw.githubusercontent.com/' + cfg.owner + '/' + cfg.repo + '/' + encodeURIComponent(cfg.branch || 'main') + '/' + cfg.path + '?t=' + Date.now();
     const r = await httpJson('GET', url, { Accept: 'application/json' });
@@ -325,13 +339,14 @@
     if (!z) return DOT_HIGH;
     if (z <= 15) return DOT_LOW;
     if (z >= 17) return DOT_HIGH;
-    return 32; // zoom 16
+    return Math.round((DOT_LOW + DOT_HIGH) / 2); // zoom 16 – pośredni między dużym a małym
   }
+  function dotBorder(px) { return px >= 28 ? 4 : px >= 20 ? 3 : 2; }
   function dotPxStyle() {
     const px = dotPx();
     return 'position:absolute;width:' + px + 'px;height:' + px + 'px;border-radius:50%;box-sizing:border-box;'
       + 'transform:translate(-50%,-50%);pointer-events:auto;cursor:pointer;'
-      + 'border:' + (px >= 34 ? 4 : 3) + 'px solid #ffffff;box-shadow:0 0 0 2px rgba(0,0,0,.65), 0 3px 8px rgba(0,0,0,.45)';
+      + 'border:' + dotBorder(px) + 'px solid #ffffff;box-shadow:0 0 0 2px rgba(0,0,0,.65), 0 3px 8px rgba(0,0,0,.45)';
   }
 
   function makeDot(id) {
@@ -413,7 +428,7 @@
     const px = dotPx();
     if (px !== lastDotPx) {
       lastDotPx = px;
-      const bw = px >= 34 ? 4 : 3;
+      const bw = dotBorder(px);
       for (const el of dotEls.values()) {
         el.style.width = px + 'px';
         el.style.height = px + 'px';
@@ -523,10 +538,18 @@
       (TYPES[it.type] || it.type) + ' · ' + (on ? 'błędne (nie ma w OSM)' : 'z powrotem do dodania'));
   }
 
+  // Zmiany nie lecą do GitHuba po każdym kliknięciu: zbieramy je i wysyłamy raz na SYNC_MS.
   function schedulePush() {
+    dirtySince = Date.now();
     if (!cfg.token) { setStatus('auto-zapis wstrzymany – wpisz token w Ustawieniach bazy'); return; }
-    clearTimeout(pushTimer);
-    pushTimer = setTimeout(() => { pushNow('Aktualizacja bazy progów (WME)').catch(() => {}); }, 300);
+    setStatus('zmiany czekają – auto-zapis co ' + Math.round(SYNC_MS / 60000) + ' min');
+    if (pushTimer) return;
+    pushTimer = setTimeout(() => { pushTimer = null; flushPush(); }, SYNC_MS);
+  }
+  async function flushPush() {
+    if (!dirtySince || pushing) return;
+    try { await pushNow('Aktualizacja bazy progów (WME)'); }
+    catch (e) { /* dirtySince zostaje – kolejny cykl spróbuje ponownie */ }
   }
   async function pushNow(msg) {
     if (!cfg.token) throw new Error('brak tokenu');
@@ -651,7 +674,10 @@
     if (ref) ref.onclick = () => pull(true);
 
     const push = root.querySelector('[data-push]');
-    if (push) push.onclick = () => pushNow('Ręczna aktualizacja bazy progów (WME)').catch(e => toast(e.message));
+    if (push) push.onclick = () => {
+      clearTimeout(pushTimer); pushTimer = null;
+      pushNow('Ręczna aktualizacja bazy progów (WME)').catch(e => toast(e.message));
+    };
 
     const dash = root.querySelector('[data-dash]');
     if (dash) dash.onclick = () => { try { window.open(dashUrl(), 'progi-wme'); } catch (e) { toast('Nie udało się otworzyć strony'); } };
@@ -784,15 +810,18 @@
       if (document.visibilityState === 'visible' && !pushing) pull(false);
     }, Math.max(10, cfg.interval || 20) * 1000);
 
-    // ponawianie nieudanego auto-zapisu
+    // pilnowanie wysyłki: jeśli coś czeka, a timer nie tyka (np. po błędzie sieci) – uzbrój ponownie
     setInterval(() => {
-      if (dirtySince && !pushing && cfg.token) pushNow('Aktualizacja bazy progów (WME)').catch(() => {});
-    }, 15000);
+      if (dirtySince && !pushing && cfg.token && !pushTimer) schedulePush();
+    }, 30000);
   }
 
   if (typeof GM_registerMenuCommand === 'function') {
     GM_registerMenuCommand('Progi: odśwież bazę', () => pull(true));
-    GM_registerMenuCommand('Progi: wyślij zmiany teraz', () => pushNow('Ręczna aktualizacja bazy progów (WME)').catch(e => toast(e.message)));
+    GM_registerMenuCommand('Progi: wyślij zmiany teraz', () => {
+      clearTimeout(pushTimer); pushTimer = null;
+      pushNow('Ręczna aktualizacja bazy progów (WME)').catch(e => toast(e.message));
+    });
     GM_registerMenuCommand('Progi: pokaż/ukryj menu', () => {
       const root = document.getElementById(GROUP_ID) || document.getElementById('pz-fallback');
       if (!root) return;

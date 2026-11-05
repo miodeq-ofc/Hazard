@@ -602,8 +602,18 @@ async function ghRead(){
     if(r.status===404)return {sha:null,doc:docFromItems()};
     if(!r.ok)throw new Error('GitHub odczyt: HTTP '+r.status+(r.status===401?' (zły token?)':r.status===403?' (brak uprawnień / limit API?)':''));
     const j=await r.json();
+    /* Contents API nie zwraca treści plików > 1 MB (content:"", encoding:"none") –
+       wtedy czytamy ten sam plik przez download_url (raw), a sha zostaje z API (potrzebne do zapisu). */
+    let text='';
+    if(j&&j.content&&j.encoding!=='none'){try{text=b64d(j.content);}catch(e){text='';}}
+    if(!text){
+      const rawUrl=(j&&j.download_url?j.download_url:`https://raw.githubusercontent.com/${cfg.owner}/${cfg.repo}/${encodeURIComponent(cfg.branch||'main')}/${cfg.path}`)+'?t='+Date.now();
+      const rr=await fetch(rawUrl,{cache:'no-store'});
+      if(!rr.ok)throw new Error('Plik bazy jest duży (> 1 MB) i GitHub nie zwrócił treści; surowy odczyt: HTTP '+rr.status);
+      return {sha:j.sha,doc:await rr.json()};
+    }
     let doc={version:2,synced:{},items:{}};
-    try{doc=JSON.parse(b64d(j.content));}catch(e){throw new Error('Plik w repo nie jest poprawnym JSON-em');}
+    try{doc=JSON.parse(text);}catch(e){throw new Error('Plik w repo nie jest poprawnym JSON-em');}
     return {sha:j.sha,doc};
   }
   const url=`https://raw.githubusercontent.com/${cfg.owner}/${cfg.repo}/${encodeURIComponent(cfg.branch||'main')}/${cfg.path}?t=${Date.now()}`;
