@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Progi zwalniające – warstwa WME
 // @namespace    https://github.com/miodeq-ofc/Hazard
-// @version      2.2.0
+// @version      2.3.0
 // @description  Kropki progów zwalniających z OSM na mapie WME + wspólna baza JSON na GitHubie, zsynchronizowana ze stroną (index.html). Alt+klik = „dodane”, Alt+Shift+klik = „błędne”. Menu w Layers.
 // @author       miodeq
 // @match        *://*.waze.com/*editor*
@@ -12,46 +12,37 @@
 // @grant        unsafeWindow
 // @connect      api.github.com
 // @connect      raw.githubusercontent.com
+// @connect      api.openstreetmap.org
 // @run-at       document-end
 // @updateURL    https://raw.githubusercontent.com/miodeq-ofc/Hazard/main/progi.user.js
 // @downloadURL  https://raw.githubusercontent.com/miodeq-ofc/Hazard/main/progi.user.js
 // @supportURL   https://github.com/miodeq-ofc/Hazard
 // ==/UserScript==
 
-/*  Progi zwalniające – warstwa WME (2.2.0)
+/*  Progi zwalniające – warstwa WME (2.3.0)
 
-    CO ROBI:
-    - rysuje kropki progów zwalniających (traffic_calming) z bazy data/progi.json
-    - kropki są duże (26 px) i leżą NAD segmentami; klik w kropkę nie zaznacza segmentu pod nią
-    - kolory: pomarańczowy = do dodania, niebieski = nowe, zielony = dodane,
-      fioletowy = błędne (nie ma w OSM, a w terenie jest), czerwony = zniknęły z OSM
-    - najechanie na kropkę = pasek u góry z typem, stanem i datą z OSM
-    - Alt + klik  = przełącz „dodane”
-    - Alt + Shift + klik = przełącz „błędne”
-    - każda zmiana od razu leci do GitHuba (token w ustawieniach w menu warstw)
-    - co 20 s pobiera bazę z GitHuba, więc zmiany ze strony index.html widać bez odświeżania
+    JAK RYSUJE:
+    - kropki to NAKŁADKA DOM (div z kropkami) przyklejona do viewportu mapy,
+      a nie warstwa wektorowa SDK — dlatego są NAD segmentami, ikonami ostrzeżeń
+      i wszystkim innym, co rysuje WME
+    - rozmiar 34 px, biała obwódka + ciemna aureola, więc widać je na każdym tle
+    - klik w kropkę łapie kropka (element DOM), więc segment pod spodem się nie zaznacza
+    - najechanie = pasek u góry z typem, stanem i datą dodania z OSM
+      (daty nie ma w bazie, więc dociągam ją z api.openstreetmap.org wersja 1 i zapamiętuję)
 
-    MENU:
-    - nie ma osobnego okienka: wszystko jest w menu Layers (grupa „Progi by Miodeq”),
-      tak jak w skrypcie WME Geoportal
-    - ustawienia bazy (repo, gałąź, token) schowane w rozwijanym „Ustawienia bazy”
-    - gdyby WME nie miało jeszcze menu warstw, po chwili pojawi się awaryjne okienko
+    STEROWANIE:
+    - Alt + klik = „dodane”, Alt + Shift + klik = „błędne”, sam klik = przypnij info
+    - każda zmiana zapisuje się SAMA do GitHuba (0,3 s po kliknięciu);
+      jeśli sieć zawiedzie, skrypt ponawia co 15 s
+    - menu jest w Layers („Progi by Miodeq”): filtry, licznik, Ustawienia bazy
 
-    AKTUALIZACJE:
-    - Tampermonkey sam sprawdza @updateURL / @downloadURL (raw.githubusercontent.com).
-    - Żeby wymusić: ikona Tampermonkey → „Sprawdź aktualizacje skryptów”.
-    - Po każdej zmianie w tym pliku trzeba podbić @version powyżej.
-
-    SYNCHRONIZACJA ZE STRONĄ:
-    - odczyt działa bez tokenu (repo publiczne → raw.githubusercontent.com)
-    - połączenia idą przez GM_xmlhttpRequest, więc CSP Waze (connect-src) ich nie blokuje
-    - zapis wymaga tokenu GitHub (fine-grained, uprawnienie „Contents: read and write”)
+    AKTUALIZACJE: Tampermonkey sam sprawdza @updateURL; po zmianie pliku podbij @version.
 */
 
 (function () {
   'use strict';
 
-  const VERSION = '2.2.0';
+  const VERSION = '2.3.0';
   const DEFAULTS = {
     owner: 'miodeq-ofc',
     repo: 'Hazard',
@@ -64,24 +55,27 @@
     collapsed: false
   };
 
-  const LAYER = 'Progi zwalniające';
   const GROUP_ID = 'pz-group';
   const COLORS = { todo: '#f59e0b', new: '#2563eb', done: '#16a34a', bad: '#7c3aed', gone: '#dc2626' };
   const NAMES = { todo: 'do dodania', new: 'nowe', done: 'dodane', bad: 'błędne', gone: 'zniknęły z OSM' };
   const KINDS = ['todo', 'new', 'done', 'bad', 'gone'];
   const TYPES = { bump: 'bump (próg)', hump: 'hump (garb)', table: 'table (płaski)', cushion: 'cushion (poduszka)' };
 
-  const DOT_PX = 26;        // średnica kropki na mapie
-  const HIT_PX = 16;        // promień trafienia kursorem (piksele)
-  const MAX = 4000;         // maks. kropek przy dużym zbliżeniu
-  const MAX_FAR = 1200;     // maks. kropek przy oddaleniu
-  const Z_INDEX = 4000;     // ponad segmentami i warstwami Geoportalu (te mają 3000)
+  const DOT_PX = 34;        // średnica kropki (px)
+  const MAX_DOTS = 900;     // ile kropek maksymalnie w jednym widoku
+  const OSM_API = 'https://api.openstreetmap.org/api/0.6/';
+  const Z_OVERLAY = 9000;   // ponad pane'ami mapy WME
 
   let cfg = { ...DEFAULTS };
   const items = new Map();
   const filters = { todo: true, new: true, done: true, bad: true, gone: false };
-  let sdk = null, ready = false, pushing = false, pushTimer = null, pulling = false, rafPending = false;
-  let lastStatus = '—', hoverTimer = 0, hoverId = null, hoverHide = null;
+  let sdk = null, ready = false, pushing = false, pushTimer = null, pulling = false;
+  let lastStatus = '—', dirtySince = 0;
+  let overlay = null, dotEls = new Map(), visibleIds = [], lastKey = '';
+  let hoverId = null, hoverPin = null, hoverSeq = 0;
+
+  const osmCache = {};
+  let osmSaveTimer = null;
 
   /* ---------- ustawienia ---------- */
   function getCfg() {
@@ -97,6 +91,23 @@
       if (typeof GM_setValue === 'function') GM_setValue('progi.cfg', s);
       else localStorage.setItem('progi.cfg', s);
     } catch (e) { /* ignore */ }
+  }
+  function loadOsmCache() {
+    try {
+      const v = typeof GM_getValue === 'function' ? GM_getValue('progi.osm', null) : localStorage.getItem('progi.osm');
+      if (v) Object.assign(osmCache, typeof v === 'string' ? JSON.parse(v) : v);
+    } catch (e) { /* ignore */ }
+  }
+  function saveOsmCache() {
+    if (osmSaveTimer) return;
+    osmSaveTimer = setTimeout(() => {
+      osmSaveTimer = null;
+      try {
+        const s = JSON.stringify(osmCache);
+        if (typeof GM_setValue === 'function') GM_setValue('progi.osm', s);
+        else localStorage.setItem('progi.osm', s);
+      } catch (e) { /* ignore */ }
+    }, 4000);
   }
 
   /* ---------- narzędzia ---------- */
@@ -155,15 +166,7 @@
     return changed;
   }
 
-  function osmLine(it) {
-    const parts = [];
-    if (it.ot) parts.push('w OSM: ' + datePL(it.ot) + (it.ov ? ' (v' + it.ov + ')' : ''));
-    if (it.da) parts.push('dodane w Waze: ' + it.da);
-    if (it.note) parts.push('„' + it.note + '”');
-    return parts.join(' · ');
-  }
-
-  /* ---------- GitHub (GM_xmlhttpRequest omija CSP i CORS) ---------- */
+  /* ---------- GitHub przez GM_xmlhttpRequest (omija CSP Waze) ---------- */
   function gmRequest(method, url, headers, body) {
     return new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
@@ -203,7 +206,7 @@
   }
 
   async function ghWrite(doc, msg) {
-    if (!cfg.token) throw new Error('zapis wymaga tokenu GitHub (Ustawienia bazy w menu warstw)');
+    if (!cfg.token) throw new Error('zapis wymaga tokenu GitHub (Ustawienia bazy w menu Layers)');
     let work = doc;
     for (let attempt = 0; attempt < 3; attempt++) {
       const cur = await ghRead();
@@ -220,17 +223,38 @@
     throw new Error('konflikt zapisu – spróbuj ponownie');
   }
 
-  /* ---------- ikony ---------- */
-  const iconCache = {};
-  function icon(color) {
-    if (!iconCache[color]) {
-      const r = DOT_PX / 2 - 2;
-      const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + DOT_PX + '" height="' + DOT_PX + '"><circle cx="' + (DOT_PX / 2) + '" cy="' + (DOT_PX / 2) + '" r="' + r + '" fill="' + color + '" stroke="#ffffff" stroke-width="3"/></svg>';
-      iconCache[color] = 'data:image/svg+xml;base64,' + btoa(svg);
-    }
-    return iconCache[color];
+  /* ---------- data dodania z OSM (leniwie, z cache) ---------- */
+  function osmType(id) {
+    const c = String(id).charAt(0);
+    return c === 'w' ? 'way' : c === 'r' ? 'relation' : 'node';
   }
-  const styleOf = k => ({ externalGraphic: icon(COLORS[k]), fillOpacity: 1, strokeOpacity: 1 });
+  function osmNum(id) {
+    return String(id).replace(/[^0-9]/g, '');
+  }
+  async function osmDate(it) {
+    if (it.ot) return { t: it.ot, v: it.ov || 0 };
+    const cached = osmCache[it.id];
+    if (cached) return cached.miss ? null : cached;
+    const num = osmNum(it.id);
+    if (!num) return null;
+    try {
+      const r = await httpJson('GET', OSM_API + osmType(it.id) + '/' + num + '/1.json', { Accept: 'application/json' });
+      if (r.status >= 200 && r.status < 300) {
+        const j = await r.json();
+        const el = (j.elements || [])[0];
+        if (el && el.timestamp) {
+          osmCache[it.id] = { t: el.timestamp, v: el.version || 1 };
+          saveOsmCache();
+          return osmCache[it.id];
+        }
+      }
+      osmCache[it.id] = { miss: true };
+      saveOsmCache();
+      return null;
+    } catch (e) {
+      return null;
+    }
+  }
 
   /* ---------- WME SDK ---------- */
   async function initSdk() {
@@ -238,37 +262,13 @@
     const get = W.getWmeSdk || window.getWmeSdk;
     if (typeof get !== 'function') return false;
     try {
-      sdk = await get({ scriptId: 'progi-wme-layer', scriptName: 'Progi zwalniające' });
+      sdk = await get({ scriptId: 'progi-wme-dots', scriptName: 'Progi zwalniające' });
       return !!(sdk && sdk.Map);
     } catch (e) {
       console.warn('[Progi] SDK:', e);
       return false;
     }
   }
-
-  function createLayer() {
-    if (!sdk) return;
-    try { sdk.Map.removeLayer({ layerName: LAYER }); } catch (e) { /* nie było */ }
-    const rules = [{ style: { externalGraphic: icon('#9ca3af'), fillOpacity: 1 } }];
-    for (const k of KINDS) rules.push({ predicate: p => p && p.k === k, style: styleOf(k) });
-    try {
-      sdk.Map.addLayer({ layerName: LAYER, zIndexing: true, styleRules: rules });
-    } catch (e) {
-      console.warn('[Progi] addLayer:', e);
-      setStatus('nie udało się utworzyć warstwy: ' + (e && e.message ? e.message : e));
-      return;
-    }
-    // nad segmentami i nad warstwami geoportalu (3000)
-    try { sdk.Map.setLayerZIndex({ layerName: LAYER, zIndex: Z_INDEX }); } catch (e) { /* starsze SDK */ }
-    setVisibility(cfg.visible !== false);
-  }
-
-  function setVisibility(v) {
-    if (!sdk) return;
-    try { sdk.Map.setLayerVisibility({ layerName: LAYER, visibility: !!v }); }
-    catch (e) { try { sdk.Map.setLayerVisibility({ layerName: LAYER, visible: !!v }); } catch (_) { /* ignore */ } }
-  }
-
   function mapCenter() {
     try {
       const c = sdk.Map.getMapCenter();
@@ -279,146 +279,197 @@
   function zoomLevel() {
     try { const z = sdk.Map.getZoomLevel(); return typeof z === 'number' ? z : 0; } catch (e) { return 0; }
   }
-  function pixelOf(it) {
+  function mapExtent() {
+    try {
+      const b = sdk.Map.getMapExtent();
+      if (Array.isArray(b) && b.length === 4) return b; // [left, bottom, right, top]
+    } catch (e) { /* ignore */ }
+    return null;
+  }
+  function mapPixel(it) {
+    try {
+      const p = sdk.Map.getMapPixelFromLonLat({ lonLat: { lat: it.lat, lon: it.lon } });
+      if (p && typeof p.x === 'number' && typeof p.y === 'number') return p;
+    } catch (e) { /* ignore */ }
     try {
       const p = sdk.Map.getPixelFromLonLat({ lonLat: { lat: it.lat, lon: it.lon } });
-      return (p && typeof p.x === 'number' && typeof p.y === 'number') ? p : null;
-    } catch (e) { return null; }
-  }
-
-  /* ---------- rysowanie ---------- */
-  function scheduleRender() {
-    if (rafPending) return;
-    rafPending = true;
-    requestAnimationFrame(() => { rafPending = false; render(); });
-  }
-
-  function visibleList() {
-    const out = [];
-    for (const it of items.values()) if (filters[kindOf(it)]) out.push(it);
-    return out;
-  }
-
-  function render() {
-    if (!sdk || !ready) return;
-    const list = visibleList();
-    const c = mapCenter();
-    const cap = zoomLevel() >= 14 ? MAX : MAX_FAR;
-    let shown = list;
-    if (list.length > cap) {
-      shown = c ? list.slice().sort((a, b) => dist(c[0], c[1], a.lat, a.lon) - dist(c[0], c[1], b.lat, b.lon)).slice(0, cap) : list.slice(0, cap);
-    }
-
-    try { sdk.Map.removeAllFeaturesFromLayer({ layerName: LAYER }); } catch (e) { /* brak warstwy */ }
-
-    const features = shown.map(it => ({
-      id: String(it.id),
-      type: 'Feature',
-      geometry: { type: 'Point', coordinates: [it.lon, it.lat] },
-      properties: { k: kindOf(it) }
-    }));
-
-    for (let i = 0; i < features.length; i += 1500) {
-      try { sdk.Map.addFeaturesToLayer({ layerName: LAYER, features: features.slice(i, i + 1500) }); }
-      catch (e) {
-        console.warn('[Progi] addFeaturesToLayer:', e);
-        setStatus('błąd rysowania: ' + (e && e.message ? e.message : e));
-        break;
-      }
-    }
-
-    updatePanel();
-    if (!pushing) setStatus('na mapie: ' + features.length + ' z ' + items.size + (list.length > shown.length ? ' (najbliższe środkowi mapy)' : ''));
-  }
-
-  /* ---------- trafianie w kropkę ---------- */
-  function hitTest(clientX, clientY) {
-    if (!sdk || !ready || cfg.visible === false) return null;
-    let ll = null;
-    try { ll = sdk.Map.getLonLatFromPixel({ x: clientX, y: clientY }); } catch (e) { return null; }
-    if (!ll || typeof ll.lat !== 'number' || typeof ll.lon !== 'number') return null;
-
-    const cands = [];
-    for (const it of items.values()) {
-      if (!filters[kindOf(it)]) continue;
-      const d = dist(ll.lat, ll.lon, it.lat, it.lon);
-      if (d <= 120) cands.push([d, it]);
-    }
-    if (!cands.length) return null;
-    cands.sort((a, b) => a[0] - b[0]);
-
-    for (let i = 0; i < cands.length && i < 8; i++) {
-      const it = cands[i][1];
-      const p = pixelOf(it);
-      if (p && Math.abs(p.x - clientX) <= HIT_PX && Math.abs(p.y - clientY) <= HIT_PX) return it;
-    }
+      if (p && typeof p.x === 'number' && typeof p.y === 'number') return p;
+    } catch (e) { /* ignore */ }
     return null;
   }
 
-  /* ---------- pasek info u góry ---------- */
+  /* ---------- nakładka DOM ---------- */
+  function ensureOverlay() {
+    if (overlay && overlay.isConnected) return overlay;
+    let vp = null;
+    try { vp = sdk.Map.getMapViewportElement(); } catch (e) { return null; }
+    if (!vp) return null;
+    try {
+      const pos = window.getComputedStyle(vp).position;
+      if (pos === 'static' || !pos) vp.style.position = 'relative';
+    } catch (e) { /* ignore */ }
+    overlay = document.createElement('div');
+    overlay.id = 'pz-overlay';
+    overlay.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;overflow:hidden;pointer-events:none;z-index:' + Z_OVERLAY;
+    vp.appendChild(overlay);
+    dotEls = new Map();
+    return overlay;
+  }
+
+  function dotStyle() {
+    return 'position:absolute;width:' + DOT_PX + 'px;height:' + DOT_PX + 'px;border-radius:50%;box-sizing:border-box;'
+      + 'transform:translate(-50%,-50%);pointer-events:auto;cursor:pointer;'
+      + 'border:4px solid #ffffff;box-shadow:0 0 0 2px rgba(0,0,0,.65), 0 3px 8px rgba(0,0,0,.45)';
+  }
+
+  function makeDot(id) {
+    const el = document.createElement('div');
+    el.className = 'pz-dot';
+    el.dataset.id = id;
+    el.style.cssText = dotStyle();
+
+    el.addEventListener('mousedown', ev => { ev.stopPropagation(); }, true);
+
+    el.addEventListener('click', ev => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const it = items.get(id);
+      if (!it) return;
+      if (ev.altKey && ev.shiftKey) { toggleBad(id); return; }
+      if (ev.altKey) { toggleDone(id); return; }
+      showHover(it, 6000);
+    }, true);
+
+    el.addEventListener('mouseenter', () => {
+      const it = items.get(id);
+      if (it) showHover(it, 0);
+    });
+    el.addEventListener('mouseleave', () => {
+      if (!hoverPin) hideHover();
+    });
+
+    return el;
+  }
+
+  function rebuildVisible() {
+    if (!sdk || !ready) return;
+    const ov = ensureOverlay();
+    if (!ov) return;
+    if (cfg.visible === false) { ov.style.display = 'none'; visibleIds = []; return; }
+    ov.style.display = 'block';
+
+    const bbox = mapExtent();
+    const c = mapCenter();
+    let list = [];
+    for (const it of items.values()) {
+      if (!filters[kindOf(it)]) continue;
+      if (bbox && (it.lon < bbox[0] || it.lon > bbox[2] || it.lat < bbox[1] || it.lat > bbox[3])) continue;
+      list.push(it);
+    }
+    if (list.length > MAX_DOTS && c) {
+      list.sort((a, b) => dist(c[0], c[1], a.lat, a.lon) - dist(c[0], c[1], b.lat, b.lon));
+      list = list.slice(0, MAX_DOTS);
+    }
+
+    const keep = new Set();
+    for (const it of list) {
+      keep.add(it.id);
+      let el = dotEls.get(it.id);
+      if (!el) {
+        el = makeDot(it.id);
+        ov.appendChild(el);
+        dotEls.set(it.id, el);
+      }
+      el.style.background = COLORS[kindOf(it)];
+    }
+    for (const [id, el] of dotEls) {
+      if (!keep.has(id)) { el.remove(); dotEls.delete(id); }
+    }
+
+    visibleIds = list.map(it => it.id);
+    document.querySelectorAll('[data-pz-counts]').forEach(el => {
+      const n = { todo: 0, new: 0, done: 0, bad: 0, gone: 0 };
+      for (const it of items.values()) n[kindOf(it)]++;
+      el.textContent = n.todo + ' do dodania · ' + n.done + ' dodane · ' + n.bad + ' błędne · ' + n.new + ' nowe · ' + items.size + ' razem';
+    });
+    if (!pushing) setStatus('na mapie: ' + list.length + ' z ' + items.size);
+  }
+
+  function positionDots() {
+    if (!overlay || !overlay.isConnected) return;
+    for (const [id, el] of dotEls) {
+      const it = items.get(id);
+      if (!it) continue;
+      const p = mapPixel(it);
+      if (!p) { el.style.display = 'none'; continue; }
+      el.style.display = '';
+      el.style.left = p.x + 'px';
+      el.style.top = p.y + 'px';
+    }
+  }
+
+  function viewKey() {
+    const c = mapCenter();
+    const b = mapExtent();
+    const size = (overlay && overlay.parentElement) ? (overlay.parentElement.clientWidth + 'x' + overlay.parentElement.clientHeight) : '';
+    return [zoomLevel(), c ? c[0].toFixed(5) : '', c ? c[1].toFixed(5) : '', b ? b.map(v => Number(v).toFixed(4)).join(',') : '', size].join('|');
+  }
+
+  /* ---------- pasek info ---------- */
   function hoverEl() {
     let el = document.getElementById('pz-hover');
     if (!el) {
       el = document.createElement('div');
       el.id = 'pz-hover';
-      el.style.display = 'none';
       document.body.appendChild(el);
     }
     return el;
   }
-  function showHover(it, holdMs) {
-    if (!it) { hideHover(); return; }
+
+  function hoverHtml(it, osm) {
     const k = kindOf(it);
-    const el = hoverEl();
-    el.innerHTML = '<i style="background:' + COLORS[k] + '"></i>'
+    const parts = [];
+    if (osm && osm.t) parts.push('w OSM od ' + datePL(osm.t) + (osm.v > 1 ? ' (v' + osm.v + ')' : ''));
+    else if (it.ot) parts.push('w OSM od ' + datePL(it.ot));
+    else if (it.id) parts.push('sprawdzam datę w OSM…');
+    if (it.da) parts.push('dodane w Waze: ' + it.da);
+    if (it.note) parts.push('„' + it.note + '”');
+    return '<i style="background:' + COLORS[k] + '"></i>'
       + '<b>' + esc(TYPES[it.type] || it.type) + '</b>'
       + '<span>' + esc(NAMES[k]) + '</span>'
-      + (osmLine(it) ? '<em>' + esc(osmLine(it)) + '</em>' : '')
-      + '<u>' + (it.lat.toFixed(5) + ', ' + it.lon.toFixed(5)) + '</u>';
-    el.style.display = 'flex';
-    hoverId = it.id;
-    clearTimeout(hoverHide);
-    if (holdMs) hoverHide = setTimeout(() => hideHover(), holdMs);
+      + (parts.length ? '<em>' + esc(parts.join(' · ')) + '</em>' : '')
+      + '<u>' + it.lat.toFixed(5) + ', ' + it.lon.toFixed(5) + '</u>';
   }
+
+  function paintHover(it, osm) {
+    const el = hoverEl();
+    el.innerHTML = hoverHtml(it, osm);
+    el.style.display = 'flex';
+  }
+
+  function showHover(it, holdMs) {
+    if (!it) { hideHover(); return; }
+    hoverId = it.id;
+    hoverPin = holdMs > 0 ? it.id : null;
+    clearTimeout(hoverPin);
+    const seq = ++hoverSeq;
+    paintHover(it, null);
+    if (!it.ot && !osmCache[it.id]) {
+      osmDate(it).then(d => {
+        if (seq !== hoverSeq || hoverId !== it.id) return;
+        const cur = items.get(it.id) || it;
+        paintHover(cur, d);
+      });
+    }
+    if (holdMs > 0) {
+      hoverPin = setTimeout(() => { hoverPin = null; hideHover(); }, holdMs);
+    }
+  }
+
   function hideHover() {
     const el = document.getElementById('pz-hover');
     if (el) el.style.display = 'none';
     hoverId = null;
-  }
-
-  /* ---------- zdarzenia mapy ---------- */
-  function attachMapHandlers() {
-    if (!sdk || !ready) return;
-    let el = null;
-    try { el = sdk.Map.getMapViewportElement(); } catch (e) { return; }
-    if (!el || el.__pzHandlers) return;
-    el.__pzHandlers = true;
-
-    el.addEventListener('mousedown', ev => {
-      if (hitTest(ev.clientX, ev.clientY)) ev.stopPropagation();
-    }, true);
-
-    el.addEventListener('click', ev => {
-      const hit = hitTest(ev.clientX, ev.clientY);
-      if (!hit) return;
-      ev.preventDefault();
-      ev.stopPropagation();
-      if (ev.altKey && ev.shiftKey) { toggleBad(hit.id); return; }
-      if (ev.altKey) { toggleDone(hit.id); return; }
-      showHover(hit, 6000);
-    }, true);
-
-    el.addEventListener('mousemove', ev => {
-      const now = Date.now();
-      if (now - hoverTimer < 60) return;
-      hoverTimer = now;
-      const hit = hitTest(ev.clientX, ev.clientY);
-      if (!hit) { if (hoverId) hideHover(); return; }
-      if (hit.id === hoverId) return;
-      showHover(hit, 0);
-    }, true);
-
-    el.addEventListener('mouseleave', () => hideHover(), true);
   }
 
   /* ---------- akcje ---------- */
@@ -426,9 +477,11 @@
     const it = items.get(id);
     if (!it) return;
     Object.assign(it, patch, { ts: Date.now() });
-    updatePanel();
-    scheduleRender();
-    if (hoverId === id) showHover(it, 2500);
+    dirtySince = Date.now();
+    const el = dotEls.get(id);
+    if (el) el.style.background = COLORS[kindOf(it)];
+    rebuildVisible();
+    if (hoverId === id) showHover(it, 0);
     if (label) toast(label);
     schedulePush();
   }
@@ -448,26 +501,25 @@
   }
 
   function schedulePush() {
-    if (!cfg.token) { setStatus('zmiana lokalna – brak tokenu, nie zapisano w GitHubie'); return; }
+    if (!cfg.token) { setStatus('auto-zapis wstrzymany – wpisz token w Ustawieniach bazy'); return; }
     clearTimeout(pushTimer);
-    pushTimer = setTimeout(() => { pushNow('Aktualizacja bazy progów (WME)').catch(() => {}); }, 600);
+    pushTimer = setTimeout(() => { pushNow('Aktualizacja bazy progów (WME)').catch(() => {}); }, 300);
   }
   async function pushNow(msg) {
     if (!cfg.token) throw new Error('brak tokenu');
     if (pushing) return null;
     pushing = true;
-    setStatus('zapisuję w GitHubie…');
+    setStatus('auto-zapis: wysyłam…');
     try {
       const merged = await ghWrite(docFromItems(), msg);
       applyDoc(merged);
-      updatePanel();
-      scheduleRender();
+      dirtySince = 0;
       const when = new Date().toLocaleTimeString('pl-PL');
-      // po rysowaniu, żeby „na mapie: …” nie nadpisało potwierdzenia zapisu
-      setTimeout(() => setStatus('zapisano · ' + when), 60);
+      rebuildVisible();
+      setTimeout(() => setStatus('auto-zapis ✓ ' + when), 60);
       return merged;
     } catch (e) {
-      setStatus('błąd zapisu: ' + e.message);
+      setStatus('auto-zapis: błąd (' + e.message + ') – ponawiam co 15 s');
       throw e;
     } finally { pushing = false; }
   }
@@ -477,9 +529,8 @@
     try {
       const { doc } = await ghRead();
       const changed = applyDoc(doc);
-      if (changed.length || loud) scheduleRender();
-      updatePanel();
-      setStatus('baza: ' + items.size + ' progów' + (changed.length ? ' · nowe z GitHuba: ' + changed.length : ''));
+      if (changed.length || loud) rebuildVisible();
+      if (!pushing) setStatus('baza: ' + items.size + ' progów' + (changed.length ? ' · nowe z GitHuba: ' + changed.length : ''));
     } catch (e) {
       const hint = cfg.token ? ' – sprawdź token (Contents: read/write) i połączenie' : ' – sprawdź internet; bez tokenu czytamy raw.githubusercontent.com';
       setStatus('błąd odczytu: ' + e.message + hint);
@@ -515,10 +566,10 @@
       '#pz-group .pz-st,#pz-fallback .pz-st{font-size:10px;opacity:.7;margin-top:5px;min-height:13px}',
       '#pz-fallback{position:fixed;right:14px;bottom:14px;z-index:100000;width:255px;padding:2px;border-radius:8px;background:#1b2029;color:#e6e9ef;border:1px solid #2d3442;box-shadow:0 8px 24px rgba(0,0,0,.4)}',
       '#pz-hover{position:fixed;top:56px;left:50%;transform:translateX(-50%);z-index:100002;display:none;align-items:center;gap:8px;',
-      'background:rgba(17,24,39,.94);color:#fff;border:1px solid #374151;border-radius:9px;padding:6px 12px;font:13px system-ui,sans-serif;',
+      'background:rgba(17,24,39,.95);color:#fff;border:1px solid #374151;border-radius:9px;padding:7px 13px;font:13px system-ui,sans-serif;',
       'box-shadow:0 6px 20px rgba(0,0,0,.35);pointer-events:none;max-width:92vw;white-space:nowrap;overflow:hidden}',
       '#pz-hover i{width:12px;height:12px;border-radius:50%;display:inline-block;flex:0 0 auto}',
-      '#pz-hover em{font-style:normal;opacity:.8}',
+      '#pz-hover em{font-style:normal;opacity:.85}',
       '#pz-hover u{text-decoration:none;opacity:.55;font-size:11px}',
       '#pz-toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);z-index:100003;background:#111827;color:#fff;',
       'border:1px solid #374151;border-radius:8px;padding:7px 13px;font:13px system-ui,sans-serif;opacity:0;transition:opacity .25s;pointer-events:none}',
@@ -527,7 +578,7 @@
     document.head.appendChild(st);
   }
 
-  /* ---------- markup menu ---------- */
+  /* ---------- menu w Layers ---------- */
   function menuHtml() {
     return ''
       + '<div class="pz-h" data-pz-min><button type="button">' + (cfg.collapsed ? '▸' : '▾') + '</button>'
@@ -567,11 +618,11 @@
     };
 
     root.querySelectorAll('[data-f]').forEach(cb => {
-      cb.onchange = () => { filters[cb.dataset.f] = cb.checked; scheduleRender(); };
+      cb.onchange = () => { filters[cb.dataset.f] = cb.checked; rebuildVisible(); positionDots(); };
     });
 
     const vis = root.querySelector('[data-vis]');
-    if (vis) vis.onchange = e => { cfg.visible = e.target.checked; setCfg(); setVisibility(cfg.visible); };
+    if (vis) vis.onchange = e => { cfg.visible = e.target.checked; setCfg(); rebuildVisible(); positionDots(); };
 
     const ref = root.querySelector('[data-refresh]');
     if (ref) ref.onclick = () => pull(true);
@@ -605,11 +656,16 @@
       await pull(true);
     };
 
-    updatePanel();
     setStatus(lastStatus);
+    updateCounts();
+  }
+  function updateCounts() {
+    const n = { todo: 0, new: 0, done: 0, bad: 0, gone: 0 };
+    for (const it of items.values()) n[kindOf(it)]++;
+    const txt = n.todo + ' do dodania · ' + n.done + ' dodane · ' + n.bad + ' błędne · ' + n.new + ' nowe · ' + items.size + ' razem';
+    document.querySelectorAll('[data-pz-counts]').forEach(el => { el.textContent = txt; });
   }
 
-  /* ---------- wstrzyknięcie do menu Layers ---------- */
   function switcherList() {
     return document.querySelector('#layer-switcher-region [class*="scrollable"] > ul')
       || document.querySelector('#layer-switcher-region ul.togglers--RNmLJ')
@@ -617,12 +673,10 @@
       || document.querySelector('#layer-switcher-region ul')
       || document.querySelector('.layer-switcher .menu .scrollable ul');
   }
-
   function injectIntoLayerSwitcher() {
     if (document.getElementById(GROUP_ID)) return true;
     const list = switcherList();
     if (!list) return false;
-
     const li = document.createElement('li');
     li.id = GROUP_ID;
     li.className = 'group--Ba0d7';
@@ -630,12 +684,10 @@
     li.innerHTML = menuHtml();
     list.appendChild(li);
     wireUi(li);
-
     const fb = document.getElementById('pz-fallback');
     if (fb) fb.remove();
     return true;
   }
-
   function ensureFallback() {
     if (document.getElementById(GROUP_ID) || document.getElementById('pz-fallback')) return;
     const box = document.createElement('div');
@@ -645,12 +697,6 @@
     wireUi(box);
   }
 
-  function updatePanel() {
-    const n = { todo: 0, new: 0, done: 0, bad: 0, gone: 0 };
-    for (const it of items.values()) n[kindOf(it)]++;
-    const txt = n.todo + ' do dodania · ' + n.done + ' dodane · ' + n.bad + ' błędne · ' + n.new + ' nowe · ' + items.size + ' razem';
-    document.querySelectorAll('[data-pz-counts]').forEach(el => { el.textContent = txt; });
-  }
   function setStatus(s) {
     lastStatus = s;
     document.querySelectorAll('[data-pz-status]').forEach(el => { el.textContent = s; });
@@ -668,13 +714,25 @@
     toast._t = setTimeout(() => el.classList.remove('on'), 2400);
   }
 
-  /* ---------- start ---------- */
+  /* ---------- pętla rysowania ---------- */
+  function loop() {
+    if (sdk && ready && cfg.visible !== false) {
+      const key = viewKey();
+      if (key !== lastKey) {
+        lastKey = key;
+        rebuildVisible();
+      }
+      positionDots();
+    }
+    requestAnimationFrame(loop);
+  }
+
   async function boot() {
     const saved = getCfg();
     if (saved) cfg = { ...DEFAULTS, ...saved };
+    loadOsmCache();
     buildStyles();
 
-    // menu warstw może pojawić się później niż skrypt
     let tries = 0;
     const menuTimer = setInterval(() => {
       tries++;
@@ -682,8 +740,6 @@
       if (tries > 40) { clearInterval(menuTimer); ensureFallback(); }
     }, 1000);
     injectIntoLayerSwitcher();
-
-    // WME potrafi przerysować menu – dokładamy grupę z powrotem
     setInterval(() => {
       if (!document.getElementById(GROUP_ID)) injectIntoLayerSwitcher();
     }, 4000);
@@ -695,19 +751,25 @@
     }
     if (!ready) { setStatus('brak WME SDK – odśwież edytor (F5)'); return; }
 
-    createLayer();
-    attachMapHandlers();
-    setInterval(() => { try { attachMapHandlers(); } catch (e) { /* ignore */ } }, 10000);
+    ensureOverlay();
+    lastKey = '';
+    requestAnimationFrame(loop);
 
     await pull(true);
+
     setInterval(() => {
       if (document.visibilityState === 'visible' && !pushing) pull(false);
     }, Math.max(10, cfg.interval || 20) * 1000);
+
+    // ponawianie nieudanego auto-zapisu
+    setInterval(() => {
+      if (dirtySince && !pushing && cfg.token) pushNow('Aktualizacja bazy progów (WME)').catch(() => {});
+    }, 15000);
   }
 
   if (typeof GM_registerMenuCommand === 'function') {
     GM_registerMenuCommand('Progi: odśwież bazę', () => pull(true));
-    GM_registerMenuCommand('Progi: wyślij zmiany', () => pushNow('Ręczna aktualizacja bazy progów (WME)').catch(e => toast(e.message)));
+    GM_registerMenuCommand('Progi: wyślij zmiany teraz', () => pushNow('Ręczna aktualizacja bazy progów (WME)').catch(e => toast(e.message)));
     GM_registerMenuCommand('Progi: pokaż/ukryj menu', () => {
       const root = document.getElementById(GROUP_ID) || document.getElementById('pz-fallback');
       if (!root) return;
