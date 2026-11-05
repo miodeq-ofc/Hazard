@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Progi zwalniające – warstwa WME
 // @namespace    https://github.com/miodeq-ofc/Hazard
-// @version      2.1.1
-// @description  Kropki progów zwalniających z OSM na mapie WME + wspólna baza JSON na GitHubie, zsynchronizowana ze stroną (index.html). Alt+klik = „dodane”, Alt+Shift+klik = „błędne”.
+// @version      2.2.0
+// @description  Kropki progów zwalniających z OSM na mapie WME + wspólna baza JSON na GitHubie, zsynchronizowana ze stroną (index.html). Alt+klik = „dodane”, Alt+Shift+klik = „błędne”. Menu w Layers.
 // @author       miodeq
 // @match        *://*.waze.com/*editor*
 // @grant        GM_getValue
@@ -18,16 +18,24 @@
 // @supportURL   https://github.com/miodeq-ofc/Hazard
 // ==/UserScript==
 
-/*  Progi zwalniające – warstwa WME (2.1.1)
+/*  Progi zwalniające – warstwa WME (2.2.0)
 
     CO ROBI:
-    - rysuje na mapie WME kropki progów zwalniających (traffic_calming) z bazy data/progi.json
+    - rysuje kropki progów zwalniających (traffic_calming) z bazy data/progi.json
+    - kropki są duże (26 px) i leżą NAD segmentami; klik w kropkę nie zaznacza segmentu pod nią
     - kolory: pomarańczowy = do dodania, niebieski = nowe, zielony = dodane,
       fioletowy = błędne (nie ma w OSM, a w terenie jest), czerwony = zniknęły z OSM
-    - Alt + klik na kropce      = przełącz „dodane”
-    - Alt + Shift + klik        = przełącz „błędne”
-    - każda zmiana od razu leci do GitHuba (token w ustawieniach panelu)
+    - najechanie na kropkę = pasek u góry z typem, stanem i datą z OSM
+    - Alt + klik  = przełącz „dodane”
+    - Alt + Shift + klik = przełącz „błędne”
+    - każda zmiana od razu leci do GitHuba (token w ustawieniach w menu warstw)
     - co 20 s pobiera bazę z GitHuba, więc zmiany ze strony index.html widać bez odświeżania
+
+    MENU:
+    - nie ma osobnego okienka: wszystko jest w menu Layers (grupa „Progi by Miodeq”),
+      tak jak w skrypcie WME Geoportal
+    - ustawienia bazy (repo, gałąź, token) schowane w rozwijanym „Ustawienia bazy”
+    - gdyby WME nie miało jeszcze menu warstw, po chwili pojawi się awaryjne okienko
 
     AKTUALIZACJE:
     - Tampermonkey sam sprawdza @updateURL / @downloadURL (raw.githubusercontent.com).
@@ -38,40 +46,44 @@
     - odczyt działa bez tokenu (repo publiczne → raw.githubusercontent.com)
     - połączenia idą przez GM_xmlhttpRequest, więc CSP Waze (connect-src) ich nie blokuje
     - zapis wymaga tokenu GitHub (fine-grained, uprawnienie „Contents: read and write”)
-    - strona index.html ma własny token w swoich ustawieniach; to ten sam plik w repo
 */
 
 (function () {
   'use strict';
 
-  const VERSION = '2.1.1';
+  const VERSION = '2.2.0';
   const DEFAULTS = {
     owner: 'miodeq-ofc',
     repo: 'Hazard',
     branch: 'main',
     path: 'data/progi.json',
     token: '',
-    dash: '',            // domyślnie https://<owner>.github.io/<repo>/
-    interval: 20,        // sekundy
+    dash: '',
+    interval: 20,
     visible: true,
     collapsed: false
   };
 
   const LAYER = 'Progi zwalniające';
+  const GROUP_ID = 'pz-group';
   const COLORS = { todo: '#f59e0b', new: '#2563eb', done: '#16a34a', bad: '#7c3aed', gone: '#dc2626' };
   const NAMES = { todo: 'do dodania', new: 'nowe', done: 'dodane', bad: 'błędne', gone: 'zniknęły z OSM' };
   const KINDS = ['todo', 'new', 'done', 'bad', 'gone'];
   const TYPES = { bump: 'bump (próg)', hump: 'hump (garb)', table: 'table (płaski)', cushion: 'cushion (poduszka)' };
-  const MAX = 4000;        // maks. kropek przy dużym zbliżeniu
-  const MAX_FAR = 1200;    // maks. kropek przy oddaleniu
-  const HIT_M = 60;        // promień trafienia Alt+klik (metry)
+
+  const DOT_PX = 26;        // średnica kropki na mapie
+  const HIT_PX = 16;        // promień trafienia kursorem (piksele)
+  const MAX = 4000;         // maks. kropek przy dużym zbliżeniu
+  const MAX_FAR = 1200;     // maks. kropek przy oddaleniu
+  const Z_INDEX = 4000;     // ponad segmentami i warstwami Geoportalu (te mają 3000)
 
   let cfg = { ...DEFAULTS };
   const items = new Map();
   const filters = { todo: true, new: true, done: true, bad: true, gone: false };
-  let sdk = null, ready = false, pushing = false, pushTimer = null, pulling = false, dashWin = null, rafPending = false;
+  let sdk = null, ready = false, pushing = false, pushTimer = null, pulling = false, rafPending = false;
+  let lastStatus = '—', hoverTimer = 0, hoverId = null, hoverHide = null;
 
-  /* ---------- magazyn ustawień (GM albo localStorage) ---------- */
+  /* ---------- ustawienia ---------- */
   function getCfg() {
     try {
       const v = typeof GM_getValue === 'function' ? GM_getValue('progi.cfg', null) : localStorage.getItem('progi.cfg');
@@ -91,6 +103,12 @@
   const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const wait = ms => new Promise(r => setTimeout(r, ms));
   const today = () => new Date().toLocaleDateString('sv-SE');
+
+  function datePL(v) {
+    if (!v) return '';
+    const d = new Date(v);
+    return isNaN(d.getTime()) ? '' : d.toLocaleDateString('pl-PL');
+  }
   function dist(a, b, c, d) {
     const R = 6371000, r = Math.PI / 180, dl = (c - a) * r, dn = (d - b) * r;
     const x = Math.sin(dl / 2) ** 2 + Math.cos(a * r) * Math.cos(c * r) * Math.sin(dn / 2) ** 2;
@@ -103,7 +121,8 @@
     return btoa(out);
   }
   function b64d(b64) {
-    const bin = atob(String(b64 || '').replace(/\s/g, ''));
+    const clean = String(b64 || '').replace(/[^A-Za-z0-9+/=]/g, '');
+    const bin = atob(clean);
     const u = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
     return new TextDecoder().decode(u);
@@ -136,9 +155,15 @@
     return changed;
   }
 
-  /* ---------- GitHub ---------- */
-  // WME ma restrykcyjne CSP (connect-src → tylko domeny Waze), więc zwykły fetch do
-  // api.github.com kończy się „Failed to fetch”. GM_xmlhttpRequest działa poza CSP i CORS.
+  function osmLine(it) {
+    const parts = [];
+    if (it.ot) parts.push('w OSM: ' + datePL(it.ot) + (it.ov ? ' (v' + it.ov + ')' : ''));
+    if (it.da) parts.push('dodane w Waze: ' + it.da);
+    if (it.note) parts.push('„' + it.note + '”');
+    return parts.join(' · ');
+  }
+
+  /* ---------- GitHub (GM_xmlhttpRequest omija CSP i CORS) ---------- */
   function gmRequest(method, url, headers, body) {
     return new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
@@ -157,11 +182,12 @@
     const r = await fetch(url, { method, headers, body, cache: 'no-store' });
     return { status: r.status, json: () => r.json() };
   }
-  const apiUrl = () => `https://api.github.com/repos/${cfg.owner}/${cfg.repo}/contents/${cfg.path}`;
+  const apiUrl = () => 'https://api.github.com/repos/' + cfg.owner + '/' + cfg.repo + '/contents/' + cfg.path;
+
   async function ghRead() {
     if (!cfg.owner || !cfg.repo || !cfg.path) throw new Error('brak konfiguracji repo');
     if (cfg.token) {
-      const r = await httpJson('GET', `${apiUrl()}?ref=${encodeURIComponent(cfg.branch || 'main')}`, {
+      const r = await httpJson('GET', apiUrl() + '?ref=' + encodeURIComponent(cfg.branch || 'main'), {
         Authorization: 'Bearer ' + cfg.token, Accept: 'application/vnd.github+json'
       });
       if (r.status === 404) return { sha: null, doc: docFromItems() };
@@ -169,14 +195,15 @@
       const j = await r.json();
       return { sha: j.sha, doc: JSON.parse(b64d(j.content)) };
     }
-    const url = `https://raw.githubusercontent.com/${cfg.owner}/${cfg.repo}/${encodeURIComponent(cfg.branch || 'main')}/${cfg.path}?t=${Date.now()}`;
+    const url = 'https://raw.githubusercontent.com/' + cfg.owner + '/' + cfg.repo + '/' + encodeURIComponent(cfg.branch || 'main') + '/' + cfg.path + '?t=' + Date.now();
     const r = await httpJson('GET', url, { Accept: 'application/json' });
     if (r.status === 404) return { sha: null, doc: docFromItems() };
     if (r.status < 200 || r.status >= 300) throw new Error('GitHub odczyt (raw): HTTP ' + r.status);
     return { sha: null, doc: await r.json() };
   }
+
   async function ghWrite(doc, msg) {
-    if (!cfg.token) throw new Error('zapis wymaga tokenu GitHub (ustawienia w panelu)');
+    if (!cfg.token) throw new Error('zapis wymaga tokenu GitHub (Ustawienia bazy w menu warstw)');
     let work = doc;
     for (let attempt = 0; attempt < 3; attempt++) {
       const cur = await ghRead();
@@ -193,11 +220,12 @@
     throw new Error('konflikt zapisu – spróbuj ponownie');
   }
 
-  /* ---------- ikony kropek (base64, jak w dokumentacji SDK) ---------- */
+  /* ---------- ikony ---------- */
   const iconCache = {};
   function icon(color) {
     if (!iconCache[color]) {
-      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18"><circle cx="9" cy="9" r="7" fill="${color}" stroke="#ffffff" stroke-width="2.5"/></svg>`;
+      const r = DOT_PX / 2 - 2;
+      const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + DOT_PX + '" height="' + DOT_PX + '"><circle cx="' + (DOT_PX / 2) + '" cy="' + (DOT_PX / 2) + '" r="' + r + '" fill="' + color + '" stroke="#ffffff" stroke-width="3"/></svg>';
       iconCache[color] = 'data:image/svg+xml;base64,' + btoa(svg);
     }
     return iconCache[color];
@@ -220,8 +248,6 @@
 
   function createLayer() {
     if (!sdk) return;
-    // addLayer rzuca InvalidStateError, gdy warstwa istnieje → usuwamy i tworzymy od nowa,
-    // dzięki temu po aktualizacji skryptu nowe kolory zawsze się aplikują
     try { sdk.Map.removeLayer({ layerName: LAYER }); } catch (e) { /* nie było */ }
     const rules = [{ style: { externalGraphic: icon('#9ca3af'), fillOpacity: 1 } }];
     for (const k of KINDS) rules.push({ predicate: p => p && p.k === k, style: styleOf(k) });
@@ -232,6 +258,8 @@
       setStatus('nie udało się utworzyć warstwy: ' + (e && e.message ? e.message : e));
       return;
     }
+    // nad segmentami i nad warstwami geoportalu (3000)
+    try { sdk.Map.setLayerZIndex({ layerName: LAYER, zIndex: Z_INDEX }); } catch (e) { /* starsze SDK */ }
     setVisibility(cfg.visible !== false);
   }
 
@@ -248,29 +276,40 @@
     } catch (e) { /* ignore */ }
     return null;
   }
-  function zoom() {
+  function zoomLevel() {
     try { const z = sdk.Map.getZoomLevel(); return typeof z === 'number' ? z : 0; } catch (e) { return 0; }
   }
+  function pixelOf(it) {
+    try {
+      const p = sdk.Map.getPixelFromLonLat({ lonLat: { lat: it.lat, lon: it.lon } });
+      return (p && typeof p.x === 'number' && typeof p.y === 'number') ? p : null;
+    } catch (e) { return null; }
+  }
 
+  /* ---------- rysowanie ---------- */
   function scheduleRender() {
     if (rafPending) return;
     rafPending = true;
     requestAnimationFrame(() => { rafPending = false; render(); });
   }
 
+  function visibleList() {
+    const out = [];
+    for (const it of items.values()) if (filters[kindOf(it)]) out.push(it);
+    return out;
+  }
+
   function render() {
     if (!sdk || !ready) return;
-    const list = [];
-    for (const it of items.values()) if (filters[kindOf(it)]) list.push(it);
-
+    const list = visibleList();
     const c = mapCenter();
-    const cap = zoom() >= 14 ? MAX : MAX_FAR;
+    const cap = zoomLevel() >= 14 ? MAX : MAX_FAR;
     let shown = list;
     if (list.length > cap) {
       shown = c ? list.slice().sort((a, b) => dist(c[0], c[1], a.lat, a.lon) - dist(c[0], c[1], b.lat, b.lon)).slice(0, cap) : list.slice(0, cap);
     }
 
-    try { sdk.Map.removeAllFeaturesFromLayer({ layerName: LAYER }); } catch (e) { /* warstwy jeszcze nie ma */ }
+    try { sdk.Map.removeAllFeaturesFromLayer({ layerName: LAYER }); } catch (e) { /* brak warstwy */ }
 
     const features = shown.map(it => ({
       id: String(it.id),
@@ -279,7 +318,6 @@
       properties: { k: kindOf(it) }
     }));
 
-    // dodajemy partiami – 4000 punktów w jednym wywołaniu potrafi zamulić edytor
     for (let i = 0; i < features.length; i += 1500) {
       try { sdk.Map.addFeaturesToLayer({ layerName: LAYER, features: features.slice(i, i + 1500) }); }
       catch (e) {
@@ -290,49 +328,107 @@
     }
 
     updatePanel();
-    setStatus(`na mapie: ${features.length} z ${items.size}` + (list.length > shown.length ? ' (najbliższe środkowi mapy)' : ''));
+    if (!pushing) setStatus('na mapie: ' + features.length + ' z ' + items.size + (list.length > shown.length ? ' (najbliższe środkowi mapy)' : ''));
   }
 
-  /* ---------- Alt + klik ---------- */
-  function nearest(lat, lon, maxM) {
-    let best = null, bd = maxM;
+  /* ---------- trafianie w kropkę ---------- */
+  function hitTest(clientX, clientY) {
+    if (!sdk || !ready || cfg.visible === false) return null;
+    let ll = null;
+    try { ll = sdk.Map.getLonLatFromPixel({ x: clientX, y: clientY }); } catch (e) { return null; }
+    if (!ll || typeof ll.lat !== 'number' || typeof ll.lon !== 'number') return null;
+
+    const cands = [];
     for (const it of items.values()) {
       if (!filters[kindOf(it)]) continue;
-      const d = dist(lat, lon, it.lat, it.lon);
-      if (d < bd) { bd = d; best = it; }
+      const d = dist(ll.lat, ll.lon, it.lat, it.lon);
+      if (d <= 120) cands.push([d, it]);
     }
-    return best;
+    if (!cands.length) return null;
+    cands.sort((a, b) => a[0] - b[0]);
+
+    for (let i = 0; i < cands.length && i < 8; i++) {
+      const it = cands[i][1];
+      const p = pixelOf(it);
+      if (p && Math.abs(p.x - clientX) <= HIT_PX && Math.abs(p.y - clientY) <= HIT_PX) return it;
+    }
+    return null;
   }
-  function attachMapClick() {
+
+  /* ---------- pasek info u góry ---------- */
+  function hoverEl() {
+    let el = document.getElementById('pz-hover');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'pz-hover';
+      el.style.display = 'none';
+      document.body.appendChild(el);
+    }
+    return el;
+  }
+  function showHover(it, holdMs) {
+    if (!it) { hideHover(); return; }
+    const k = kindOf(it);
+    const el = hoverEl();
+    el.innerHTML = '<i style="background:' + COLORS[k] + '"></i>'
+      + '<b>' + esc(TYPES[it.type] || it.type) + '</b>'
+      + '<span>' + esc(NAMES[k]) + '</span>'
+      + (osmLine(it) ? '<em>' + esc(osmLine(it)) + '</em>' : '')
+      + '<u>' + (it.lat.toFixed(5) + ', ' + it.lon.toFixed(5)) + '</u>';
+    el.style.display = 'flex';
+    hoverId = it.id;
+    clearTimeout(hoverHide);
+    if (holdMs) hoverHide = setTimeout(() => hideHover(), holdMs);
+  }
+  function hideHover() {
+    const el = document.getElementById('pz-hover');
+    if (el) el.style.display = 'none';
+    hoverId = null;
+  }
+
+  /* ---------- zdarzenia mapy ---------- */
+  function attachMapHandlers() {
     if (!sdk || !ready) return;
     let el = null;
     try { el = sdk.Map.getMapViewportElement(); } catch (e) { return; }
-    if (!el || el.__pzClick) return;
-    el.__pzClick = true;
-    el.addEventListener('click', ev => {
-      if (!ev.altKey) return;
-      let ll = null;
-      try { ll = sdk.Map.getLonLatFromPixel({ x: ev.clientX, y: ev.clientY }); } catch (e) { /* ignore */ }
-      if (!ll || typeof ll.lat !== 'number' || typeof ll.lon !== 'number') return;
-      const hit = nearest(ll.lat, ll.lon, HIT_M);
-      if (!hit) { toast('Brak progu w promieniu ' + HIT_M + ' m'); return; }
-      ev.preventDefault(); ev.stopPropagation();
-      if (ev.shiftKey) toggleBad(hit.id); else toggleDone(hit.id);
+    if (!el || el.__pzHandlers) return;
+    el.__pzHandlers = true;
+
+    el.addEventListener('mousedown', ev => {
+      if (hitTest(ev.clientX, ev.clientY)) ev.stopPropagation();
     }, true);
+
+    el.addEventListener('click', ev => {
+      const hit = hitTest(ev.clientX, ev.clientY);
+      if (!hit) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (ev.altKey && ev.shiftKey) { toggleBad(hit.id); return; }
+      if (ev.altKey) { toggleDone(hit.id); return; }
+      showHover(hit, 6000);
+    }, true);
+
+    el.addEventListener('mousemove', ev => {
+      const now = Date.now();
+      if (now - hoverTimer < 60) return;
+      hoverTimer = now;
+      const hit = hitTest(ev.clientX, ev.clientY);
+      if (!hit) { if (hoverId) hideHover(); return; }
+      if (hit.id === hoverId) return;
+      showHover(hit, 0);
+    }, true);
+
+    el.addEventListener('mouseleave', () => hideHover(), true);
   }
 
   /* ---------- akcje ---------- */
-  function broadcast(arr) {
-    const msg = { kind: 'progi:items', items: (arr || []).map(stripItem) };
-    if (dashWin) { try { dashWin.postMessage(msg, '*'); } catch (e) { /* ignore */ } }
-  }
   function setItem(id, patch, label) {
     const it = items.get(id);
     if (!it) return;
     Object.assign(it, patch, { ts: Date.now() });
     updatePanel();
     scheduleRender();
-    broadcast([it]);
+    if (hoverId === id) showHover(it, 2500);
     if (label) toast(label);
     schedulePush();
   }
@@ -341,14 +437,14 @@
     if (!it) return;
     const on = !it.done;
     setItem(id, { done: on ? 1 : 0, bad: 0, da: on ? today() : '' },
-      `${TYPES[it.type] || it.type} · ${on ? 'dodane' : 'do dodania'}`);
+      (TYPES[it.type] || it.type) + ' · ' + (on ? 'dodane' : 'do dodania'));
   }
   function toggleBad(id) {
     const it = items.get(id);
     if (!it) return;
     const on = !it.bad;
     setItem(id, { bad: on ? 1 : 0, done: 0, da: '' },
-      `${TYPES[it.type] || it.type} · ${on ? 'błędne (nie ma w OSM)' : 'z powrotem do dodania'}`);
+      (TYPES[it.type] || it.type) + ' · ' + (on ? 'błędne (nie ma w OSM)' : 'z powrotem do dodania'));
   }
 
   function schedulePush() {
@@ -366,7 +462,9 @@
       applyDoc(merged);
       updatePanel();
       scheduleRender();
-      setStatus('zapisano · ' + new Date().toLocaleTimeString('pl-PL'));
+      const when = new Date().toLocaleTimeString('pl-PL');
+      // po rysowaniu, żeby „na mapie: …” nie nadpisało potwierdzenia zapisu
+      setTimeout(() => setStatus('zapisano · ' + when), 60);
       return merged;
     } catch (e) {
       setStatus('błąd zapisu: ' + e.message);
@@ -381,7 +479,7 @@
       const changed = applyDoc(doc);
       if (changed.length || loud) scheduleRender();
       updatePanel();
-      setStatus(`baza: ${items.size} progów` + (changed.length ? ` · nowe z GitHuba: ${changed.length}` : ''));
+      setStatus('baza: ' + items.size + ' progów' + (changed.length ? ' · nowe z GitHuba: ' + changed.length : ''));
     } catch (e) {
       const hint = cfg.token ? ' – sprawdź token (Contents: read/write) i połączenie' : ' – sprawdź internet; bez tokenu czytamy raw.githubusercontent.com';
       setStatus('błąd odczytu: ' + e.message + hint);
@@ -391,135 +489,216 @@
   function dashUrl() {
     if (cfg.dash) return cfg.dash;
     const repo = cfg.repo || '';
-    if (repo.toLowerCase() === `${(cfg.owner || '').toLowerCase()}.github.io`) return `https://${repo}/`;
-    return `https://${cfg.owner}.github.io/${repo}/`;
+    if (repo.toLowerCase() === String(cfg.owner || '').toLowerCase() + '.github.io') return 'https://' + repo + '/';
+    return 'https://' + cfg.owner + '.github.io/' + repo + '/';
   }
 
-  /* ---------- panel ---------- */
-  let panel, statusEl, countsEl;
-  function buildPanel() {
-    const box = document.createElement('div');
-    box.id = 'pz-panel';
-    box.innerHTML = `
-      <style>
-        #pz-panel{position:fixed;top:70px;right:16px;z-index:100000;width:300px;font:13px/1.45 system-ui,Segoe UI,Roboto,sans-serif;
-          background:#1b2029;color:#e6e9ef;border:1px solid #2d3442;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.35)}
-        #pz-panel .pz-h{display:flex;align-items:center;gap:8px;padding:9px 11px;background:#222836;border-radius:10px 10px 0 0}
-        #pz-panel .pz-h b{flex:1;font-size:13px}
-        #pz-panel .pz-h span{font-size:11px;color:#7d8798}
-        #pz-panel .pz-h button{background:#2d3442;color:#e6e9ef;border:1px solid #3b4353;border-radius:6px;padding:1px 7px;cursor:pointer}
-        #pz-panel .pz-b{padding:10px 11px;display:${cfg.collapsed ? 'none' : 'block'}}
-        #pz-panel .pz-counts{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px;font-size:11px;color:#98a2b3}
-        #pz-panel .pz-counts b{display:block;font-size:14px;color:#e6e9ef}
-        #pz-panel .pz-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:7px}
-        #pz-panel label{display:inline-flex;gap:4px;align-items:center;cursor:pointer;font-size:12px}
-        #pz-panel .pz-dot{width:10px;height:10px;border-radius:50%;display:inline-block}
-        #pz-panel button.pz-act{background:#2563eb;border:1px solid #2563eb;color:#fff;border-radius:6px;padding:4px 9px;cursor:pointer;font:inherit}
-        #pz-panel button.pz-sec{background:#2d3442;border:1px solid #3b4353;color:#e6e9ef;border-radius:6px;padding:4px 9px;cursor:pointer;font:inherit}
-        #pz-panel input[type=text],#pz-panel input[type=password]{background:#12151c;border:1px solid #2d3442;color:#e6e9ef;border-radius:6px;padding:3px 6px;width:100%;font:inherit}
-        #pz-panel details{margin-top:8px;border-top:1px solid #2d3442;padding-top:8px}
-        #pz-panel summary{cursor:pointer;color:#98a2b3;font-size:12px}
-        #pz-panel .pz-st{font-size:11px;color:#98a2b3;margin-top:6px;min-height:15px}
-        #pz-panel .pz-tiny{font-size:11px;color:#7d8798;margin:2px 0 6px}
-        #pz-toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);z-index:100001;background:#111827;color:#fff;
-          border:1px solid #374151;border-radius:8px;padding:7px 13px;font:13px system-ui,sans-serif;opacity:0;transition:opacity .25s;pointer-events:none}
-        #pz-toast.on{opacity:1}
-      </style>
-      <div class="pz-h"><b>Progi zwalniające</b><span>v${VERSION}</span><button data-min>–</button></div>
-      <div class="pz-b">
-        <div class="pz-counts" id="pz-counts"></div>
-        <div class="pz-row">
-          ${KINDS.map(k => `<label><span class="pz-dot" style="background:${COLORS[k]}"></span><input type="checkbox" data-f="${k}" ${filters[k] ? 'checked' : ''}> ${NAMES[k]}</label>`).join('')}
-        </div>
-        <div class="pz-row">
-          <button class="pz-act" data-refresh>Odśwież</button>
-          <button class="pz-sec" data-dash>Otwórz stronę</button>
-          <button class="pz-sec" data-push>Wyślij</button>
-          <label><input type="checkbox" data-vis ${cfg.visible === false ? '' : 'checked'}> warstwa</label>
-        </div>
-        <div class="pz-tiny">Alt + klik = „dodane” · Alt + Shift + klik = „błędne”</div>
-        <div class="pz-st" id="pz-status">—</div>
-        <details>
-          <summary>Ustawienia bazy</summary>
-          <div class="pz-row" style="margin-top:6px"><input type="text" data-cfg="repo" value="${esc(cfg.owner + '/' + cfg.repo)}" placeholder="użytkownik/repo"></div>
-          <div class="pz-row"><input type="text" data-cfg="branch" value="${esc(cfg.branch)}" placeholder="gałąź"></div>
-          <div class="pz-row"><input type="text" data-cfg="path" value="${esc(cfg.path)}" placeholder="data/progi.json"></div>
-          <div class="pz-row"><input type="password" data-cfg="token" value="${esc(cfg.token)}" placeholder="token GitHub (zapis)"></div>
-          <div class="pz-row"><input type="text" data-cfg="dash" value="${esc(cfg.dash)}" placeholder="adres strony (opcjonalnie)"></div>
-          <div class="pz-row"><button class="pz-sec" data-save>Zapisz i połącz</button></div>
-        </details>
-      </div>`;
-    document.body.appendChild(box);
-    const toastEl = document.createElement('div');
-    toastEl.id = 'pz-toast';
-    document.body.appendChild(toastEl);
+  /* ---------- wygląd ---------- */
+  function buildStyles() {
+    if (document.getElementById('pz-style')) return;
+    const st = document.createElement('style');
+    st.id = 'pz-style';
+    st.textContent = [
+      '#pz-group,#pz-fallback{font:12px/1.45 system-ui,Segoe UI,Roboto,sans-serif}',
+      '#pz-group .pz-h,#pz-fallback .pz-h{display:flex;align-items:center;gap:6px;padding:4px 6px;cursor:pointer;font-weight:600}',
+      '#pz-group .pz-h span,#pz-fallback .pz-h span{font-weight:400;opacity:.6;font-size:10px}',
+      '#pz-group .pz-h button,#pz-fallback .pz-h button{background:none;border:0;color:inherit;cursor:pointer;font-size:12px;padding:0 2px}',
+      '#pz-group .pz-body,#pz-fallback .pz-body{padding:2px 6px 8px}',
+      '#pz-group .pz-counts,#pz-fallback .pz-counts{opacity:.75;font-size:11px;margin-bottom:4px}',
+      '#pz-group label.pz-f,#pz-fallback label.pz-f{display:flex;align-items:center;gap:6px;padding:2px 0;cursor:pointer;font-size:12px}',
+      '#pz-group label.pz-f i,#pz-fallback label.pz-f i{width:11px;height:11px;border-radius:50%;display:inline-block;flex:0 0 auto}',
+      '#pz-group .pz-row,#pz-fallback .pz-row{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:6px 0}',
+      '#pz-group button.pz-b,#pz-fallback button.pz-b{background:rgba(127,127,127,.18);border:1px solid rgba(127,127,127,.45);color:inherit;border-radius:5px;padding:2px 8px;cursor:pointer;font:inherit}',
+      '#pz-group details.pz-set,#pz-fallback details.pz-set{margin-top:6px;border-top:1px solid rgba(127,127,127,.3);padding-top:5px}',
+      '#pz-group details.pz-set summary,#pz-fallback details.pz-set summary{cursor:pointer;opacity:.8;font-size:11px}',
+      '#pz-group input[type=text],#pz-group input[type=password],#pz-fallback input[type=text],#pz-fallback input[type=password]{width:100%;box-sizing:border-box;margin-top:4px;background:rgba(127,127,127,.12);border:1px solid rgba(127,127,127,.45);border-radius:4px;color:inherit;padding:2px 5px;font:inherit}',
+      '#pz-group .pz-st,#pz-fallback .pz-st{font-size:10px;opacity:.7;margin-top:5px;min-height:13px}',
+      '#pz-fallback{position:fixed;right:14px;bottom:14px;z-index:100000;width:255px;padding:2px;border-radius:8px;background:#1b2029;color:#e6e9ef;border:1px solid #2d3442;box-shadow:0 8px 24px rgba(0,0,0,.4)}',
+      '#pz-hover{position:fixed;top:56px;left:50%;transform:translateX(-50%);z-index:100002;display:none;align-items:center;gap:8px;',
+      'background:rgba(17,24,39,.94);color:#fff;border:1px solid #374151;border-radius:9px;padding:6px 12px;font:13px system-ui,sans-serif;',
+      'box-shadow:0 6px 20px rgba(0,0,0,.35);pointer-events:none;max-width:92vw;white-space:nowrap;overflow:hidden}',
+      '#pz-hover i{width:12px;height:12px;border-radius:50%;display:inline-block;flex:0 0 auto}',
+      '#pz-hover em{font-style:normal;opacity:.8}',
+      '#pz-hover u{text-decoration:none;opacity:.55;font-size:11px}',
+      '#pz-toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);z-index:100003;background:#111827;color:#fff;',
+      'border:1px solid #374151;border-radius:8px;padding:7px 13px;font:13px system-ui,sans-serif;opacity:0;transition:opacity .25s;pointer-events:none}',
+      '#pz-toast.on{opacity:1}'
+    ].join('\n');
+    document.head.appendChild(st);
+  }
 
-    panel = box;
-    statusEl = box.querySelector('#pz-status');
-    countsEl = box.querySelector('#pz-counts');
+  /* ---------- markup menu ---------- */
+  function menuHtml() {
+    return ''
+      + '<div class="pz-h" data-pz-min><button type="button">' + (cfg.collapsed ? '▸' : '▾') + '</button>'
+      +   '<b>Progi by Miodeq</b><span>v' + VERSION + '</span></div>'
+      + '<div class="pz-body"' + (cfg.collapsed ? ' style="display:none"' : '') + '>'
+      +   '<div class="pz-counts" data-pz-counts></div>'
+      +   KINDS.map(k => '<label class="pz-f"><input type="checkbox" data-f="' + k + '"' + (filters[k] ? ' checked' : '') + '>'
+      +     '<i style="background:' + COLORS[k] + '"></i>' + NAMES[k] + '</label>').join('')
+      +   '<div class="pz-row">'
+      +     '<label class="pz-f"><input type="checkbox" data-vis' + (cfg.visible === false ? '' : ' checked') + '><i style="background:#9ca3af"></i>kropki</label>'
+      +     '<button class="pz-b" data-refresh type="button">Odśwież</button>'
+      +     '<button class="pz-b" data-push type="button">Wyślij</button>'
+      +     '<button class="pz-b" data-dash type="button">Strona</button>'
+      +   '</div>'
+      +   '<details class="pz-set"><summary>Ustawienia bazy</summary>'
+      +     '<input type="text" data-cfg="repo" value="' + esc(cfg.owner + '/' + cfg.repo) + '" placeholder="użytkownik/repo">'
+      +     '<input type="text" data-cfg="branch" value="' + esc(cfg.branch) + '" placeholder="gałąź">'
+      +     '<input type="text" data-cfg="path" value="' + esc(cfg.path) + '" placeholder="data/progi.json">'
+      +     '<input type="password" data-cfg="token" value="' + esc(cfg.token) + '" placeholder="token GitHub (zapis)">'
+      +     '<input type="text" data-cfg="dash" value="' + esc(cfg.dash) + '" placeholder="adres strony (opcjonalnie)">'
+      +     '<div class="pz-row"><button class="pz-b" data-save type="button">Zapisz i połącz</button></div>'
+      +   '</details>'
+      +   '<div class="pz-st" data-pz-status></div>'
+      + '</div>';
+  }
 
-    box.querySelector('[data-min]').onclick = () => {
-      const body = box.querySelector('.pz-b');
-      cfg.collapsed = body.style.display !== 'none';
-      body.style.display = cfg.collapsed ? 'none' : 'block';
+  function wireUi(root) {
+    const min = root.querySelector('[data-pz-min]');
+    if (min) min.onclick = () => {
+      const body = root.querySelector('.pz-body');
+      const hide = body.style.display !== 'none';
+      body.style.display = hide ? 'none' : 'block';
+      const btn = min.querySelector('button');
+      if (btn) btn.textContent = hide ? '▸' : '▾';
+      cfg.collapsed = hide;
       setCfg();
     };
-    box.querySelectorAll('[data-f]').forEach(cb => {
+
+    root.querySelectorAll('[data-f]').forEach(cb => {
       cb.onchange = () => { filters[cb.dataset.f] = cb.checked; scheduleRender(); };
     });
-    box.querySelector('[data-refresh]').onclick = () => pull(true);
-    box.querySelector('[data-dash]').onclick = () => {
-      const url = dashUrl();
-      try { dashWin = window.open(url, 'progi-wme-panel'); }
-      catch (e) { toast('Nie udało się otworzyć: ' + url); }
-    };
-    box.querySelector('[data-push]').onclick = () => pushNow('Ręczna aktualizacja bazy progów (WME)').catch(e => toast(e.message));
-    box.querySelector('[data-vis]').onchange = e => { cfg.visible = e.target.checked; setCfg(); setVisibility(cfg.visible); };
-    box.querySelector('[data-save]').onclick = async () => {
-      const repo = box.querySelector('[data-cfg="repo"]').value.trim().replace(/^https?:\/\/github\.com\//, '').replace(/\.git$/, '');
-      if (repo && !/^[\w.-]+\/[\w.-]+$/.test(repo)) { toast('Podaj repo jako użytkownik/repo'); return; }
-      if (repo) { cfg.owner = repo.split('/')[0]; cfg.repo = repo.split('/')[1]; }
-      cfg.branch = box.querySelector('[data-cfg="branch"]').value.trim() || 'main';
-      cfg.path = box.querySelector('[data-cfg="path"]').value.trim() || 'data/progi.json';
-      cfg.token = box.querySelector('[data-cfg="token"]').value.trim();
-      cfg.dash = box.querySelector('[data-cfg="dash"]').value.trim();
+
+    const vis = root.querySelector('[data-vis]');
+    if (vis) vis.onchange = e => { cfg.visible = e.target.checked; setCfg(); setVisibility(cfg.visible); };
+
+    const ref = root.querySelector('[data-refresh]');
+    if (ref) ref.onclick = () => pull(true);
+
+    const push = root.querySelector('[data-push]');
+    if (push) push.onclick = () => pushNow('Ręczna aktualizacja bazy progów (WME)').catch(e => toast(e.message));
+
+    const dash = root.querySelector('[data-dash]');
+    if (dash) dash.onclick = () => { try { window.open(dashUrl(), 'progi-wme'); } catch (e) { toast('Nie udało się otworzyć strony'); } };
+
+    const save = root.querySelector('[data-save]');
+    if (save) save.onclick = async () => {
+      const val = n => (root.querySelector('[data-cfg="' + n + '"]').value || '').trim();
+      let repo = val('repo');
+      repo = repo.split('github.com/').pop().split('?')[0];
+      if (repo.endsWith('.git')) repo = repo.slice(0, -4);
+      if (repo && repo.indexOf('/') > 0) {
+        const parts = repo.split('/');
+        cfg.owner = parts[0];
+        cfg.repo = parts[1];
+      } else if (repo) {
+        toast('Podaj repo jako użytkownik/repo');
+        return;
+      }
+      cfg.branch = val('branch') || 'main';
+      cfg.path = val('path') || 'data/progi.json';
+      cfg.token = val('token');
+      cfg.dash = val('dash');
       setCfg();
       toast('Zapisano ustawienia');
       await pull(true);
     };
+
     updatePanel();
+    setStatus(lastStatus);
+  }
+
+  /* ---------- wstrzyknięcie do menu Layers ---------- */
+  function switcherList() {
+    return document.querySelector('#layer-switcher-region [class*="scrollable"] > ul')
+      || document.querySelector('#layer-switcher-region ul.togglers--RNmLJ')
+      || document.querySelector('#layer-switcher-region .scrollable ul')
+      || document.querySelector('#layer-switcher-region ul')
+      || document.querySelector('.layer-switcher .menu .scrollable ul');
+  }
+
+  function injectIntoLayerSwitcher() {
+    if (document.getElementById(GROUP_ID)) return true;
+    const list = switcherList();
+    if (!list) return false;
+
+    const li = document.createElement('li');
+    li.id = GROUP_ID;
+    li.className = 'group--Ba0d7';
+    li.style.listStyle = 'none';
+    li.innerHTML = menuHtml();
+    list.appendChild(li);
+    wireUi(li);
+
+    const fb = document.getElementById('pz-fallback');
+    if (fb) fb.remove();
+    return true;
+  }
+
+  function ensureFallback() {
+    if (document.getElementById(GROUP_ID) || document.getElementById('pz-fallback')) return;
+    const box = document.createElement('div');
+    box.id = 'pz-fallback';
+    box.innerHTML = menuHtml();
+    document.body.appendChild(box);
+    wireUi(box);
+  }
+
+  function updatePanel() {
+    const n = { todo: 0, new: 0, done: 0, bad: 0, gone: 0 };
+    for (const it of items.values()) n[kindOf(it)]++;
+    const txt = n.todo + ' do dodania · ' + n.done + ' dodane · ' + n.bad + ' błędne · ' + n.new + ' nowe · ' + items.size + ' razem';
+    document.querySelectorAll('[data-pz-counts]').forEach(el => { el.textContent = txt; });
+  }
+  function setStatus(s) {
+    lastStatus = s;
+    document.querySelectorAll('[data-pz-status]').forEach(el => { el.textContent = s; });
   }
   function toast(t) {
-    const el = document.getElementById('pz-toast');
-    if (!el) return;
+    let el = document.getElementById('pz-toast');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'pz-toast';
+      document.body.appendChild(el);
+    }
     el.textContent = t;
     el.classList.add('on');
     clearTimeout(toast._t);
     toast._t = setTimeout(() => el.classList.remove('on'), 2400);
   }
-  function updatePanel() {
-    if (!countsEl) return;
-    const n = { todo: 0, new: 0, done: 0, bad: 0, gone: 0 };
-    for (const it of items.values()) n[kindOf(it)]++;
-    countsEl.innerHTML = ['todo', 'done', 'bad', 'new', 'gone']
-      .map(k => `<span><b>${n[k]}</b>${NAMES[k]}</span>`).join('');
-  }
-  function setStatus(s) { if (statusEl) statusEl.textContent = s; }
 
   /* ---------- start ---------- */
   async function boot() {
     const saved = getCfg();
     if (saved) cfg = { ...DEFAULTS, ...saved };
-    buildPanel();
+    buildStyles();
+
+    // menu warstw może pojawić się później niż skrypt
+    let tries = 0;
+    const menuTimer = setInterval(() => {
+      tries++;
+      if (injectIntoLayerSwitcher()) { clearInterval(menuTimer); return; }
+      if (tries > 40) { clearInterval(menuTimer); ensureFallback(); }
+    }, 1000);
+    injectIntoLayerSwitcher();
+
+    // WME potrafi przerysować menu – dokładamy grupę z powrotem
+    setInterval(() => {
+      if (!document.getElementById(GROUP_ID)) injectIntoLayerSwitcher();
+    }, 4000);
+
     setStatus('czekam na WME SDK…');
     for (let i = 0; i < 90 && !ready; i++) {
       if (await initSdk()) { ready = true; break; }
       await wait(1000);
     }
     if (!ready) { setStatus('brak WME SDK – odśwież edytor (F5)'); return; }
+
     createLayer();
-    attachMapClick();
-    setInterval(() => { try { attachMapClick(); } catch (e) { /* ignore */ } }, 10000);
+    attachMapHandlers();
+    setInterval(() => { try { attachMapHandlers(); } catch (e) { /* ignore */ } }, 10000);
+
     await pull(true);
     setInterval(() => {
       if (document.visibilityState === 'visible' && !pushing) pull(false);
@@ -529,13 +708,11 @@
   if (typeof GM_registerMenuCommand === 'function') {
     GM_registerMenuCommand('Progi: odśwież bazę', () => pull(true));
     GM_registerMenuCommand('Progi: wyślij zmiany', () => pushNow('Ręczna aktualizacja bazy progów (WME)').catch(e => toast(e.message)));
-    GM_registerMenuCommand('Progi: pokaż/ukryj panel', () => {
-      if (!panel) return;
-      const body = panel.querySelector('.pz-b');
-      const hide = body.style.display !== 'none';
-      body.style.display = hide ? 'none' : 'block';
-      cfg.collapsed = hide;
-      setCfg();
+    GM_registerMenuCommand('Progi: pokaż/ukryj menu', () => {
+      const root = document.getElementById(GROUP_ID) || document.getElementById('pz-fallback');
+      if (!root) return;
+      const body = root.querySelector('.pz-body');
+      body.style.display = body.style.display === 'none' ? 'block' : 'none';
     });
   }
 
