@@ -62,8 +62,8 @@
   const KINDS = ['todo', 'new', 'done', 'bad', 'gone'];
   const TYPES = { bump: 'bump (próg)', hump: 'hump (garb)', table: 'table (płaski)', cushion: 'cushion (poduszka)' };
 
-  const DOT_LOW = 34;       // średnica przy oddaleniu (zoom ≤ 15)
-  const DOT_HIGH = 30;      // średnica od zoomu 17 w górę (między 34 a starym 26)
+  const DOT_LOW = 23;       // średnica przy oddaleniu (zoom ≤ 15)
+  const DOT_HIGH = 17;      // średnica od zoomu 17 w górę (między 34 a starym 26)
   const MAX_DOTS = 900;     // ile kropek maksymalnie w jednym widoku
   const OSM_API = 'https://api.openstreetmap.org/api/0.6/';
   const Z_OVERLAY = 9000;   // ponad pane'ami mapy WME
