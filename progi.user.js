@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Progi zwalniające – warstwa WME
 // @namespace    https://github.com/miodeq-ofc/Hazard
-// @version      2.3.0
+// @version      2.3.1
 // @description  Kropki progów zwalniających z OSM na mapie WME + wspólna baza JSON na GitHubie, zsynchronizowana ze stroną (index.html). Alt+klik = „dodane”, Alt+Shift+klik = „błędne”. Menu w Layers.
 // @author       miodeq
 // @match        *://*.waze.com/*editor*
@@ -19,13 +19,14 @@
 // @supportURL   https://github.com/miodeq-ofc/Hazard
 // ==/UserScript==
 
-/*  Progi zwalniające – warstwa WME (2.3.0)
+/*  Progi zwalniające – warstwa WME (2.3.1)
 
     JAK RYSUJE:
     - kropki to NAKŁADKA DOM (div z kropkami) przyklejona do viewportu mapy,
       a nie warstwa wektorowa SDK — dlatego są NAD segmentami, ikonami ostrzeżeń
       i wszystkim innym, co rysuje WME
-    - rozmiar 34 px, biała obwódka + ciemna aureola, więc widać je na każdym tle
+    - rozmiar zależny od przybliżenia: 34 px przy oddaleniu (zoom ≤ 15), 32 px na 16,
+      30 px od zoomu 17 w górę; biała obwódka + ciemna aureola, więc widać je na każdym tle
     - klik w kropkę łapie kropka (element DOM), więc segment pod spodem się nie zaznacza
     - najechanie = pasek u góry z typem, stanem i datą dodania z OSM
       (daty nie ma w bazie, więc dociągam ją z api.openstreetmap.org wersja 1 i zapamiętuję)
@@ -42,7 +43,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '2.3.0';
+  const VERSION = '2.3.1';
   const DEFAULTS = {
     owner: 'miodeq-ofc',
     repo: 'Hazard',
@@ -61,7 +62,8 @@
   const KINDS = ['todo', 'new', 'done', 'bad', 'gone'];
   const TYPES = { bump: 'bump (próg)', hump: 'hump (garb)', table: 'table (płaski)', cushion: 'cushion (poduszka)' };
 
-  const DOT_PX = 34;        // średnica kropki (px)
+  const DOT_LOW = 34;       // średnica przy oddaleniu (zoom ≤ 15)
+  const DOT_HIGH = 30;      // średnica od zoomu 17 w górę (między 34 a starym 26)
   const MAX_DOTS = 900;     // ile kropek maksymalnie w jednym widoku
   const OSM_API = 'https://api.openstreetmap.org/api/0.6/';
   const Z_OVERLAY = 9000;   // ponad pane'ami mapy WME
@@ -313,20 +315,30 @@
     overlay.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;overflow:hidden;pointer-events:none;z-index:' + Z_OVERLAY;
     vp.appendChild(overlay);
     dotEls = new Map();
+    lastDotPx = 0;
     return overlay;
   }
 
-  function dotStyle() {
-    return 'position:absolute;width:' + DOT_PX + 'px;height:' + DOT_PX + 'px;border-radius:50%;box-sizing:border-box;'
+  // rozmiar kropki zależny od przybliżenia: duży przy oddaleniu, mniejszy przy pracy z detałem
+  function dotPx() {
+    const z = zoomLevel();
+    if (!z) return DOT_HIGH;
+    if (z <= 15) return DOT_LOW;
+    if (z >= 17) return DOT_HIGH;
+    return 32; // zoom 16
+  }
+  function dotPxStyle() {
+    const px = dotPx();
+    return 'position:absolute;width:' + px + 'px;height:' + px + 'px;border-radius:50%;box-sizing:border-box;'
       + 'transform:translate(-50%,-50%);pointer-events:auto;cursor:pointer;'
-      + 'border:4px solid #ffffff;box-shadow:0 0 0 2px rgba(0,0,0,.65), 0 3px 8px rgba(0,0,0,.45)';
+      + 'border:' + (px >= 34 ? 4 : 3) + 'px solid #ffffff;box-shadow:0 0 0 2px rgba(0,0,0,.65), 0 3px 8px rgba(0,0,0,.45)';
   }
 
   function makeDot(id) {
     const el = document.createElement('div');
     el.className = 'pz-dot';
     el.dataset.id = id;
-    el.style.cssText = dotStyle();
+    el.style.cssText = dotPxStyle();
 
     el.addEventListener('mousedown', ev => { ev.stopPropagation(); }, true);
 
@@ -395,8 +407,19 @@
     if (!pushing) setStatus('na mapie: ' + list.length + ' z ' + items.size);
   }
 
+  let lastDotPx = 0;
   function positionDots() {
     if (!overlay || !overlay.isConnected) return;
+    const px = dotPx();
+    if (px !== lastDotPx) {
+      lastDotPx = px;
+      const bw = px >= 34 ? 4 : 3;
+      for (const el of dotEls.values()) {
+        el.style.width = px + 'px';
+        el.style.height = px + 'px';
+        el.style.borderWidth = bw + 'px';
+      }
+    }
     for (const [id, el] of dotEls) {
       const it = items.get(id);
       if (!it) continue;
