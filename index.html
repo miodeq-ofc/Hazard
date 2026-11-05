@@ -91,7 +91,7 @@
 <header>
   <h1>Progi zwalniające w Polsce → WME</h1>
   <span class="badge" id="cloudBadge">baza lokalna</span>
-  <span class="badge" id="ver" title="wersja pliku – po wgraniu nowej powinna się zmienić">v04.11.2026c</span>
+  <span class="badge" id="ver" title="wersja pliku – po wgraniu nowej powinna się zmienić">v04.11.2026d</span>
   <span id="status">Ładowanie…</span>
 </header>
 <main>
@@ -370,6 +370,41 @@ function saveMany(arr){if(mem||!arr||!arr.length)return Promise.resolve();return
 const today=()=>new Date().toLocaleDateString('sv-SE');
 const wme=i=>`https://www.waze.com/editor?env=row&lat=${i.lat.toFixed(7)}&lon=${i.lon.toFixed(7)}&zoomLevel=21&marker=true`;
 const osm=i=>`https://www.openstreetmap.org/${i.id[0]==='n'?'node':i.id[0]==='w'?'way':'relation'}/${i.id.slice(1)}`;
+/* data dodania do OSM – pobierana leniwie z historii obiektu, tylko po kliknięciu */
+const osmLive=new Map();   /* ulotne: „pobieram…” / błąd – nie trafia do bazy */
+const datePL=iso=>{const d=new Date(iso);return isNaN(d)?'':`${String(d.getDate()).padStart(2,'0')}.${String(d.getMonth()+1).padStart(2,'0')}.${d.getFullYear()}`;};
+async function osmDates(id){
+  const it=items.get(id); if(!it)return;
+  if(osmLive.get(id)?.state==='loading')return;
+  const m=/^([nwr])(\d+)$/.exec(id);
+  if(!m){osmLive.set(id,{state:'err'});refreshPopup(id);return;}
+  const kind={n:'node',w:'way',r:'relation'}[m[1]];
+  osmLive.set(id,{state:'loading'});refreshPopup(id);
+  try{
+    const r=await fetch(`https://api.openstreetmap.org/api/0.6/${kind}/${m[2]}/history.json`);
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    const d=await r.json(), ts=(d.elements||[]).map(e=>e.timestamp).filter(Boolean).sort();
+    if(!ts.length)throw new Error('brak wersji');
+    it.oc=ts[0]; it.ot=ts[ts.length-1]; it.ov=(d.elements||[]).length; it.ts=Date.now();
+    await saveItem(it); broadcastItems([it]); schedulePush();
+    osmLive.delete(id);
+  }catch(e){osmLive.set(id,{state:'err'});}
+  refreshPopup(id);
+}
+function osmLine(i){
+  const l=osmLive.get(i.id), ver=i.ov?` (v${i.ov})`:'';
+  let t=i.oc?`w OSM od <b>${datePL(i.oc)}</b>`:(i.ot?`ostatnia zmiana w OSM: ${datePL(i.ot)}`:'');
+  let link='';
+  if(l&&l.state==='loading')link=' <span>pobieram…</span>';
+  else if(l&&l.state==='err')link=' <span style="color:#b42318">nie udało się pobrać historii</span>';
+  else if(!i.oc)link=` <a href="#" data-osmdate="${i.id}" style="color:#2563eb;text-decoration:none">kiedy dodano?</a>`;
+  return (t||link)?`<div class="small" style="color:#667085;margin-top:4px">${t}${t?ver:''}${link}</div>`:'';
+}
+function refreshPopup(id){
+  const m=markers.get(id); if(!m||typeof m.setPopupContent!=='function')return;
+  if(typeof m.isPopupOpen==='function'&&!m.isPopupOpen())return;
+  const it=items.get(id); if(it)m.setPopupContent(popupHtml(it));
+}
 const sv=i=>`https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${i.lat.toFixed(7)},${i.lon.toFixed(7)}`;
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const wait=ms=>new Promise(r=>setTimeout(r,ms));
@@ -422,8 +457,8 @@ async function syncRegion(code,city){
   const calm='nwr["traffic_calming"~"^(bump|hump|table|cushion)$"]';
   const reg=`(area["ISO3166-2"="${code}"][admin_level=4];area["boundary"="administrative"][admin_level=4]["name"="województwo ${RNAME[code]}"];)->.w;`;
   const q=city
-    ?`[out:json][timeout:300];${reg}rel(area.w)["boundary"="administrative"]["name"="${city.replace(/["\\]/g,'')}"]["admin_level"~"^(7|8)$"];map_to_area->.c;${calm}(area.c);out center qt;`
-    :`[out:json][timeout:300];${reg}${calm}(area.w);out center qt;`;
+    ?`[out:json][timeout:300];${reg}rel(area.w)["boundary"="administrative"]["name"="${city.replace(/["\\]/g,'')}"]["admin_level"~"^(7|8)$"];map_to_area->.c;${calm}(area.c);out center meta qt;`
+    :`[out:json][timeout:300];${reg}${calm}(area.w);out center meta qt;`;
   const data=await overpass(q);
   if(data.remark&&/error|timeout|timed out|out of memory|too busy/i.test(data.remark))
     throw new Error('Overpass zgłosił problem: '+data.remark);
@@ -451,12 +486,13 @@ async function syncRegion(code,city){
     const gmina=city||gminaFor(lat,lon,idx);
     let it=items.get(id);
     if(!it){
-      it={id,lat:r7(lat),lon:r7(lon),type,fs:first?'baseline':t,gone:0,done:0,da:'',note:'',w:code,c:gmina||'',ts:Date.now()};
+      it={id,lat:r7(lat),lon:r7(lon),type,fs:first?'baseline':t,gone:0,done:0,da:'',note:'',w:code,c:gmina||'',ts:Date.now(),ov:e.version||0,ot:e.timestamp||''};
       items.set(id,it);changed.push(it);
     }else{
       let ch=false;
       if(it.lat!==r7(lat)||it.lon!==r7(lon)||it.type!==type){it.lat=r7(lat);it.lon=r7(lon);it.type=type;ch=true;}
       if(it.gone){it.gone=0;ch=true;}
+      if(e.timestamp&&it.ot!==e.timestamp){it.ot=e.timestamp;it.ov=e.version||0;ch=true;}
       if(it.w!==code){it.w=code;ch=true;}
       if(gmina&&it.c!==gmina){it.c=gmina;ch=true;}
       if(ch){it.ts=Date.now();changed.push(it);}
@@ -777,6 +813,8 @@ function initMap(){
     applySelection(selStart,map.mouseEventToLatLng(e));
   },true);
   el.addEventListener('click',async e=>{
+    const dbtn=e.target.closest('[data-osmdate]');
+    if(dbtn){e.preventDefault();await osmDates(dbtn.dataset.osmdate);return;}
     const badBtn=e.target.closest('[data-bad]');
     if(badBtn){e.preventDefault();if(items.get(badBtn.dataset.bad))await toggleBad(badBtn.dataset.bad);map.closePopup();return;}
     const btn=e.target.closest('[data-toggle]'); if(!btn)return;
@@ -815,6 +853,7 @@ function popupHtml(i){
   return `<div style="min-width:190px"><b>${esc(TYPES[i.type]||i.type)}</b><br>
     ${i.lat.toFixed(6)}, ${i.lon.toFixed(6)}
     <div class="small" style="color:#667085">${RNAME[i.w]||''}${i.c?' · '+esc(i.c):''}${i.fs!=='baseline'?' · wykryty '+i.fs:''}</div>
+    ${osmLine(i)}
     <div style="margin-top:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       <button data-toggle="${i.id}" style="border:1px solid #dfe3ea;border-radius:6px;padding:3px 8px;cursor:pointer">${pending.has(i.id)?'Cofnij':i.done?'Cofnij „dodane”':'Oznacz jako dodane'}</button>
       <button data-bad="${i.id}" title="Baza OSM nie jest kompletna – próg był w terenie, ale nie ma go w OSM" style="border:1px solid ${i.bad?'#c4b5fd':'#dfe3ea'};background:${i.bad?'#ede9fe':'#fff'};color:${i.bad?'#6d28d9':'#111'};border-radius:6px;padding:3px 8px;cursor:pointer">${i.bad?'Cofnij „błędne”':'Oznacz jako błędne'}</button>
