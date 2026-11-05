@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         Progi zwalniające – warstwa WME
 // @namespace    https://github.com/miodeq-ofc/Hazard
-// @version      2.1.0
+// @version      2.1.1
 // @description  Kropki progów zwalniających z OSM na mapie WME + wspólna baza JSON na GitHubie, zsynchronizowana ze stroną (index.html). Alt+klik = „dodane”, Alt+Shift+klik = „błędne”.
 // @author       miodeq
 // @match        *://*.waze.com/*editor*
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
+// @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
 // @connect      api.github.com
 // @connect      raw.githubusercontent.com
@@ -17,7 +18,7 @@
 // @supportURL   https://github.com/miodeq-ofc/Hazard
 // ==/UserScript==
 
-/*  Progi zwalniające – warstwa WME (2.1.0)
+/*  Progi zwalniające – warstwa WME (2.1.1)
 
     CO ROBI:
     - rysuje na mapie WME kropki progów zwalniających (traffic_calming) z bazy data/progi.json
@@ -35,6 +36,7 @@
 
     SYNCHRONIZACJA ZE STRONĄ:
     - odczyt działa bez tokenu (repo publiczne → raw.githubusercontent.com)
+    - połączenia idą przez GM_xmlhttpRequest, więc CSP Waze (connect-src) ich nie blokuje
     - zapis wymaga tokenu GitHub (fine-grained, uprawnienie „Contents: read and write”)
     - strona index.html ma własny token w swoich ustawieniach; to ten sam plik w repo
 */
@@ -42,7 +44,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '2.1.0';
+  const VERSION = '2.1.1';
   const DEFAULTS = {
     owner: 'miodeq-ofc',
     repo: 'Hazard',
@@ -101,7 +103,7 @@
     return btoa(out);
   }
   function b64d(b64) {
-    const bin = atob(String(b64 || '').replace(/\s/g, ''));
+    const bin = atob(String(b64 || '').replace(/\\s/g, ''));
     const u = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
     return new TextDecoder().decode(u);
@@ -135,23 +137,42 @@
   }
 
   /* ---------- GitHub ---------- */
+  // WME ma restrykcyjne CSP (connect-src → tylko domeny Waze), więc zwykły fetch do
+  // api.github.com kończy się „Failed to fetch”. GM_xmlhttpRequest działa poza CSP i CORS.
+  function gmRequest(method, url, headers, body) {
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        method, url, headers, data: body, timeout: 25000,
+        onload: r => resolve({ status: r.status, text: r.responseText }),
+        onerror: () => reject(new Error('nie udało się połączyć (sieć / firewall / VPN)')),
+        ontimeout: () => reject(new Error('przekroczony czas połączenia'))
+      });
+    });
+  }
+  async function httpJson(method, url, headers, body) {
+    if (typeof GM_xmlhttpRequest === 'function') {
+      const r = await gmRequest(method, url, headers, body);
+      return { status: r.status, json: () => { try { return JSON.parse(r.text); } catch (e) { throw new Error('odpowiedź to nie JSON'); } } };
+    }
+    const r = await fetch(url, { method, headers, body, cache: 'no-store' });
+    return { status: r.status, json: () => r.json() };
+  }
   const apiUrl = () => `https://api.github.com/repos/${cfg.owner}/${cfg.repo}/contents/${cfg.path}`;
   async function ghRead() {
     if (!cfg.owner || !cfg.repo || !cfg.path) throw new Error('brak konfiguracji repo');
     if (cfg.token) {
-      const r = await fetch(`${apiUrl()}?ref=${encodeURIComponent(cfg.branch || 'main')}`, {
-        cache: 'no-store',
-        headers: { Authorization: 'Bearer ' + cfg.token, Accept: 'application/vnd.github+json' }
+      const r = await httpJson('GET', `${apiUrl()}?ref=${encodeURIComponent(cfg.branch || 'main')}`, {
+        Authorization: 'Bearer ' + cfg.token, Accept: 'application/vnd.github+json'
       });
       if (r.status === 404) return { sha: null, doc: docFromItems() };
-      if (!r.ok) throw new Error('GitHub odczyt: HTTP ' + r.status + (r.status === 401 ? ' (zły token)' : r.status === 403 ? ' (brak uprawnień / limit)' : ''));
+      if (r.status < 200 || r.status >= 300) throw new Error('GitHub odczyt: HTTP ' + r.status + (r.status === 401 ? ' (zły token)' : r.status === 403 ? ' (brak uprawnień / limit)' : ''));
       const j = await r.json();
       return { sha: j.sha, doc: JSON.parse(b64d(j.content)) };
     }
     const url = `https://raw.githubusercontent.com/${cfg.owner}/${cfg.repo}/${encodeURIComponent(cfg.branch || 'main')}/${cfg.path}?t=${Date.now()}`;
-    const r = await fetch(url, { cache: 'no-store' });
+    const r = await httpJson('GET', url, { Accept: 'application/json' });
     if (r.status === 404) return { sha: null, doc: docFromItems() };
-    if (!r.ok) throw new Error('GitHub odczyt (raw): HTTP ' + r.status);
+    if (r.status < 200 || r.status >= 300) throw new Error('GitHub odczyt (raw): HTTP ' + r.status);
     return { sha: null, doc: await r.json() };
   }
   async function ghWrite(doc, msg) {
@@ -162,13 +183,11 @@
       const merged = mergeDocs(cur.doc, work);
       const body = { message: msg || 'Aktualizacja bazy progów (WME)', branch: cfg.branch || 'main', content: b64e(JSON.stringify(merged)) };
       if (cur.sha) body.sha = cur.sha;
-      const r = await fetch(apiUrl(), {
-        method: 'PUT', cache: 'no-store',
-        headers: { Authorization: 'Bearer ' + cfg.token, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      });
+      const r = await httpJson('PUT', apiUrl(), {
+        Authorization: 'Bearer ' + cfg.token, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json'
+      }, JSON.stringify(body));
       if (r.status === 409 || r.status === 412 || r.status === 422) { await wait(500 + attempt * 900); work = merged; continue; }
-      if (!r.ok) throw new Error('GitHub zapis: HTTP ' + r.status);
+      if (r.status < 200 || r.status >= 300) throw new Error('GitHub zapis: HTTP ' + r.status);
       return merged;
     }
     throw new Error('konflikt zapisu – spróbuj ponownie');
@@ -364,7 +383,8 @@
       updatePanel();
       setStatus(`baza: ${items.size} progów` + (changed.length ? ` · nowe z GitHuba: ${changed.length}` : ''));
     } catch (e) {
-      setStatus('błąd odczytu: ' + e.message);
+      const hint = cfg.token ? ' – sprawdź token (Contents: read/write) i połączenie' : ' – sprawdź internet; bez tokenu czytamy raw.githubusercontent.com';
+      setStatus('błąd odczytu: ' + e.message + hint);
     } finally { pulling = false; }
   }
 
@@ -456,8 +476,8 @@
     box.querySelector('[data-push]').onclick = () => pushNow('Ręczna aktualizacja bazy progów (WME)').catch(e => toast(e.message));
     box.querySelector('[data-vis]').onchange = e => { cfg.visible = e.target.checked; setCfg(); setVisibility(cfg.visible); };
     box.querySelector('[data-save]').onclick = async () => {
-      const repo = box.querySelector('[data-cfg="repo"]').value.trim().replace(/^https?:\/\/github\.com\//, '').replace(/\.git$/, '');
-      if (repo && !/^[\w.-]+\/[\w.-]+$/.test(repo)) { toast('Podaj repo jako użytkownik/repo'); return; }
+      const repo = box.querySelector('[data-cfg="repo"]').value.trim().replace(/^https?:\\/\\/github\\.com\\//, '').replace(/\\.git$/, '');
+      if (repo && !/^[\\w.-]+\\/[\\w.-]+$/.test(repo)) { toast('Podaj repo jako użytkownik/repo'); return; }
       if (repo) { cfg.owner = repo.split('/')[0]; cfg.repo = repo.split('/')[1]; }
       cfg.branch = box.querySelector('[data-cfg="branch"]').value.trim() || 'main';
       cfg.path = box.querySelector('[data-cfg="path"]').value.trim() || 'data/progi.json';
